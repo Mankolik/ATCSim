@@ -155,7 +155,9 @@
     <div class="row">
       <button id="clearRulers">Clear rulers</button>
     </div>
-    <div class="row small">Shift+MMB = start • RMB while measuring = drop/place • Esc = delete last ruler</div>
+    <div class="row small">Shift+LMB = start/finish (snaps to nearest a/c) •
+Plain Left Click = place ruler •
+Esc = delete last ruler</div>
   </div>
 
   <div class="section">
@@ -815,34 +817,26 @@ function handleMeasureSmartClick(xPx, yPx){
 // Measuring: Shift+MMB start/update, RMB now DROPS (commits) instead of clearing.
 //           NEW: Shift+Left Click = start/finish with snapping
 canvas.addEventListener('pointerdown', e=>{
-  // NEW: Shift + Left Click anywhere → start/finish ruler (snaps to a/c if close)
+  const rect = canvas.getBoundingClientRect();
+  const xPx = e.clientX - rect.left, yPx = e.clientY - rect.top;
+
+  // Shift + Left Click = smart start/finish (snaps to aircraft if close)
   if (e.shiftKey && e.button === 0) {
-    const rect0 = canvas.getBoundingClientRect();
-    const x0 = e.clientX - rect0.left, y0 = e.clientY - rect0.top;
-    handleMeasureSmartClick(x0, y0);
+    handleMeasureSmartClick(xPx, yPx);
     e.preventDefault();
     return;
   }
 
-  const rect=canvas.getBoundingClientRect();
-  const xPx=e.clientX-rect.left, yPx=e.clientY-rect.top;
-
-  if (e.button===1 && e.shiftKey) { // start new active ruler
-    const {x_nm,y_nm}=pxToNm(xPx,yPx);
-    state.measure = {fromX_nm:x_nm, fromY_nm:y_nm, toX_nm:x_nm, toY_nm:y_nm};
-    canvas.setPointerCapture(e.pointerId);
+  // Plain Left Click = if already measuring, drop/commit immediately
+  if (!e.shiftKey && e.button === 0 && state.measure) {
+    state.measures.push({ ...state.measure });
+    state.measure = null;
+    drawAll();
     e.preventDefault();
-  } else if (e.button===2) {
-    // Right-click behavior:
-    // If actively measuring, COMMIT current ruler (drop/place it) instead of deleting.
-    if (state.measure) {
-      state.measures.push({...state.measure});
-      state.measure=null;
-      drawAll();
-      e.preventDefault(); // swallow context menu only if we acted on it
-    }
+    return;
   }
 });
+
 
 
 canvas.addEventListener('pointermove', e=>{
