@@ -2,7 +2,7 @@
 
 A lightweight browser-based radar/ATC trainer. No build step, just open.
 
-**Live demo:** (after first deploy) https://Mankolik.github.io/atc-radar-trainer/
+**Live demo:** https://mankolik.github.io/ATCSim/
 
 ## Features
 - Semi-transparent movable track labels
