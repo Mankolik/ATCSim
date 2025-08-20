@@ -393,23 +393,69 @@ window.addEventListener('resize', resize);
     }
   }
 
-  // Spawn at full tens FLs
-  function spawnAircraft(){
-    const angle=Math.random()*Math.PI*2;
-    const r=rangeNM*(0.9+Math.random()*0.1);
-    const x=Math.sin(angle)*r, y=-Math.cos(angle)*r;
-    const hdg=mod360(toDeg(Math.atan2(-x,-y)));
+// Put this near your other globals (above spawnAircraft)
+const SPAWN = {
+  flMin: 330,      // inclusive
+  flMax: 400,      // inclusive
+  marginNM: 6,     // how far outside the sector to spawn
+  jitterDeg: 45    // ± jitter to avoid perfectly cardinal inbounds
+};
 
-    const fls=[]; for(let fl=60; fl<=450; fl+=10) fls.push(fl);
-    const FL = fls[Math.floor(Math.random()*fls.length)];
-    const alt = FL*100;
+ function spawnAircraft(){
+  // Choose a sector edge to spawn from: 0=N, 1=E, 2=S, 3=W
+  const side = Math.floor(Math.random()*4);
+  const halfW = env.rectW/2, halfH = env.rectH/2;
+  const m = SPAWN.marginNM;
 
-    const spd=alt>24000?430+Math.random()*50:210+Math.random()*70;
-    const a=new Aircraft({x_nm:x,y_nm:y,hdg:hdg,alt_ft:alt,spd_kt:spd});
-    a.setHeading(mod360(hdg+(Math.random()*40-20)));
-    a.inSector=env.inRect(a.x_nm,a.y_nm);
-    state.ac.push(a); state.selectedId=a.id; flashSelected(); updateSelectedPanel(); drawAll();
+  let x=0, y=0, hdg=0;
+
+  switch(side){
+    case 0: // from North → heading South
+      y = -(halfH + m);
+      x = (Math.random()*2 - 1) * (halfW * 0.9);
+      hdg = 180;
+      break;
+    case 1: // from East → heading West
+      x =  (halfW + m);
+      y = (Math.random()*2 - 1) * (halfH * 0.9);
+      hdg = 270;
+      break;
+    case 2: // from South → heading North
+      y =  (halfH + m);
+      x = (Math.random()*2 - 1) * (halfW * 0.9);
+      hdg = 0;
+      break;
+    default: // from West → heading East
+      x = -(halfW + m);
+      y = (Math.random()*2 - 1) * (halfH * 0.9);
+      hdg = 90;
+      break;
   }
+
+  // Add a little randomization so they’re not laser-straight
+  hdg = mod360(hdg + (Math.random()*SPAWN.jitterDeg*2 - SPAWN.jitterDeg));
+
+  // Pick FL in tens within [flMin, flMax]
+  const tMin = Math.floor(SPAWN.flMin/10);
+  const tMax = Math.floor(SPAWN.flMax/10);
+  const tens = tMin + Math.floor(Math.random()*(tMax - tMin + 1)); // integer step of 10 FLs
+  const FL = tens * 10;
+  const alt = FL * 100; // your sim uses FL * 100 = feet
+
+  // Cruise-y speed; you can also switch to Mach if you prefer
+  const spd = 430 + Math.random()*60;
+
+  const a = new Aircraft({ x_nm:x, y_nm:y, hdg:hdg, alt_ft:alt, spd_kt:spd });
+  a.setHeading(hdg);                   // ensure initial vector is inbound
+  a.inSector = env.inRect(a.x_nm, a.y_nm);
+
+  state.ac.push(a);
+  state.selectedId = a.id;
+  flashSelected();
+  updateSelectedPanel();
+  drawAll();
+}
+
   function clearAll(){
     state.ac.length=0; state.selectedId=null; updateSelectedPanel();
     // remove leftover tags
