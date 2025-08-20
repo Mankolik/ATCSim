@@ -242,6 +242,29 @@
   function bearingFromTo(x1,y1,x2,y2){
     return mod360(toDeg(Math.atan2(x2-x1, -(y2-y1))));
   }
+ function findNearestAcPx(xPx, yPx, tolPx=16){
+  let best=null, bestD=Infinity;
+  for(const a of state.ac){
+    const ax = cx + nmToPx(a.x_nm);
+    const ay = cy + nmToPx(a.y_nm);
+    const d = Math.hypot(ax - xPx, ay - yPx);
+    if(d < bestD){ bestD = d; best = a; }
+  }
+  return bestD <= tolPx ? best : null;
+}
+
+function resolveEndpoint(ep){
+  if(!ep) return null;
+  if(ep.type === 'ac'){
+    const ac = state.ac.find(a=>a.id===ep.id);
+    if(!ac) return null; // a/c may have been cleared
+    return { x_nm: ac.x_nm, y_nm: ac.y_nm };
+  }
+  // point endpoint
+  if('x_nm' in ep && 'y_nm' in ep) return { x_nm: ep.x_nm, y_nm: ep.y_nm };
+  return null;
+}
+
 
   // ---------- Aircraft ----------
   let nextId=1;
@@ -522,12 +545,22 @@ const SPAWN = {
         // Drag/select handlers
         let dragging=false, startX=0,startY=0, startDx=0,startDy=0, moved=false;
         tag.addEventListener('pointerdown', ev=>{
-          if(ev.button!==0) return; // left only
-          dragging=true; moved=false; tag.setPointerCapture(ev.pointerId);
-          tag.classList.add('dragging');
-          const aObj = state.ac.find(z=>z.id===a.id); if(!aObj) return;
-          startX=ev.clientX; startY=ev.clientY; startDx=aObj.labelDx; startDy=aObj.labelDy; ev.preventDefault();
-        });
+  // NEW: Shift + Left Click on tag → use that aircraft position as a measure point
+  if (ev.shiftKey && ev.button === 0) {
+    const ax = cx + nmToPx(a.x_nm);
+    const ay = cy + nmToPx(a.y_nm);
+    handleMeasureSmartClick(ax, ay);
+    ev.preventDefault();
+    return;
+  }
+
+  if(ev.button!==0) return; // left only
+  dragging=true; moved=false; tag.setPointerCapture(ev.pointerId);
+  tag.classList.add('dragging');
+  const aObj = state.ac.find(z=>z.id===a.id); if(!aObj) return;
+  startX=ev.clientX; startY=ev.clientY; startDx=aObj.labelDx; startDy=aObj.labelDy; ev.preventDefault();
+});
+
         tag.addEventListener('pointermove', ev=>{
           if(!dragging) return;
           const aObj = state.ac.find(z=>z.id===a.id); if(!aObj) return;
@@ -629,29 +662,63 @@ const SPAWN = {
     ctx.setLineDash([]);
   }
 
-  // --- Measuring (refactored) ---
-  function drawMeasureSegment(m){
-    const x1=cx+nmToPx(m.fromX_nm), y1=cy+nmToPx(m.fromY_nm);
-    const x2=cx+nmToPx(m.toX_nm),   y2=cy+nmToPx(m.toY_nm);
-    // line
-    ctx.strokeStyle="#9ad6ff"; ctx.lineWidth=1.8; ctx.setLineDash([8,6]);
-    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); ctx.setLineDash([]);
-    // endpoints
-    ctx.fillStyle="#e6f0f7"; ctx.beginPath(); ctx.arc(x1,y1,3,0,Math.PI*2); ctx.fill();
-    ctx.beginPath(); ctx.arc(x2,y2,3,0,Math.PI*2); ctx.fill();
-    // label at midpoint
-    const dnm = Math.hypot(m.toX_nm-m.fromX_nm, m.toY_nm-m.fromY_nm);
-    const brg = bearingFromTo(m.fromX_nm,m.fromY_nm,m.toX_nm,m.toY_nm);
-    const midx = (x1+x2)/2, midy = (y1+y2)/2;
-    const text = `${dnm.toFixed(1)} NM • HDG ${formatHeading(brg)}`;
-    ctx.font="12px ui-monospace"; const pad=4;
-    const w = ctx.measureText(text).width + pad*2, h=16+pad*2;
-    ctx.fillStyle="rgba(10,15,20,0.85)"; ctx.fillRect(midx-w/2, midy- h -8, w, h);
-    ctx.strokeStyle="#274b64"; ctx.lineWidth=1; ctx.strokeRect(midx-w/2, midy- h -8, w, h);
-    ctx.fillStyle="#cfe8f7"; ctx.fillText(text, midx - w/2 + pad, midy - 8 + pad + 12 - 2);
+// --- Measuring (refactored) ---
+// Measures now support endpoints that can be either:
+//  - {type:'ac', id:<trackId>}  -> follows that aircraft live
+//  - {x_nm:<num>, y_nm:<num>}   -> fixed point in space
+// Backward compatibility: we still render old {fromX_nm, toX_nm, ...} shapes.
+
+function drawMeasureSegment(m){
+  // Resolve endpoints (support both new and legacy shapes)
+  const p1 = m.from ? resolveEndpoint(m.from) : {x_nm:m.fromX_nm, y_nm:m.fromY_nm};
+  const p2 = m.to   ? resolveEndpoint(m.to)   : {x_nm:m.toX_nm,   y_nm:m.toY_nm};
+  if(!p1 || !p2) return; // one endpoint missing (e.g., a/c deleted)
+
+  const x1 = cx + nmToPx(p1.x_nm), y1 = cy + nmToPx(p1.y_nm);
+  const x2 = cx + nmToPx(p2.x_nm), y2 = cy + nmToPx(p2.y_nm);
+
+  // line
+  ctx.strokeStyle="#9ad6ff"; ctx.lineWidth=1.8; ctx.setLineDash([8,6]);
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); ctx.setLineDash([]);
+
+  // endpoints
+  ctx.fillStyle="#e6f0f7"; ctx.beginPath(); ctx.arc(x1,y1,3,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x2,y2,3,0,Math.PI*2); ctx.fill();
+
+  // label at midpoint
+  const dnm = Math.hypot(p2.x_nm-p1.x_nm, p2.y_nm-p1.y_nm);
+  const brg = bearingFromTo(p1.x_nm,p1.y_nm,p2.x_nm,p2.y_nm);
+  const midx = (x1+x2)/2, midy = (y1+y2)/2;
+  const text = `${dnm.toFixed(1)} NM • HDG ${formatHeading(brg)}`;
+  ctx.font="12px ui-monospace"; const pad=4;
+  const w = ctx.measureText(text).width + pad*2, h=16+pad*2;
+  ctx.fillStyle="rgba(10,15,20,0.85)"; ctx.fillRect(midx-w/2, midy- h -8, w, h);
+  ctx.strokeStyle="#274b64"; ctx.lineWidth=1; ctx.strokeRect(midx-w/2, midy- h -8, w, h);
+  ctx.fillStyle="#cfe8f7"; ctx.fillText(text, midx - w/2 + pad, midy - 8 + pad + 12 - 2);
+}
+
+function drawActiveMeasure(){ if(state.measure) drawMeasureSegment(state.measure); }
+function drawRulers(){ for(const m of state.measures) drawMeasureSegment(m); }
+
+// NEW: Shift+Left click handler — snaps to aircraft (live) or uses free point.
+function handleMeasureSmartClick(xPx, yPx){
+  const ac = findNearestAcPx(xPx, yPx, 16);
+  const ep = ac ? { type:'ac', id: ac.id }
+                : pxToNm(xPx, yPx); // {x_nm, y_nm}
+
+  if(!state.measure){
+    // Start: from = ep, to = cursor (temporary same ep)
+    state.measure = { from: ep, to: ep };
+  }else{
+    // Finish: set 'to' endpoint and commit
+    state.measure.to = ep;
+    state.measures.push({ ...state.measure }); // store by reference
+    state.measure = null;
   }
-  function drawActiveMeasure(){ if(state.measure) drawMeasureSegment(state.measure); }
-  function drawRulers(){ for(const m of state.measures) drawMeasureSegment(m); }
+  drawAll();
+}
+
+
 
   function drawCanvasBase(){
     drawScope();
@@ -745,8 +812,18 @@ const SPAWN = {
     state.selectedId=null; updateSelectedPanel(); layoutTags(); drawCanvasOnly();
   });
 
-  // Measuring: Shift+MMB start/update, RMB now DROPS (commits) instead of clearing.
+// Measuring: Shift+MMB start/update, RMB now DROPS (commits) instead of clearing.
+//           NEW: Shift+Left Click = start/finish with snapping
 canvas.addEventListener('pointerdown', e=>{
+  // NEW: Shift + Left Click anywhere → start/finish ruler (snaps to a/c if close)
+  if (e.shiftKey && e.button === 0) {
+    const rect0 = canvas.getBoundingClientRect();
+    const x0 = e.clientX - rect0.left, y0 = e.clientY - rect0.top;
+    handleMeasureSmartClick(x0, y0);
+    e.preventDefault();
+    return;
+  }
+
   const rect=canvas.getBoundingClientRect();
   const xPx=e.clientX-rect.left, yPx=e.clientY-rect.top;
 
@@ -767,14 +844,28 @@ canvas.addEventListener('pointerdown', e=>{
   }
 });
 
+
 canvas.addEventListener('pointermove', e=>{
   if(!state.measure) return;
+  // If we're mid-placing the second endpoint and it's NOT an aircraft-linked endpoint,
+  // update it to follow the cursor for a live preview.
   const rect=canvas.getBoundingClientRect();
   const xPx=e.clientX-rect.left, yPx=e.clientY-rect.top;
+
+  // If 'to' is aircraft-linked, don't override it.
+  if(state.measure.to && state.measure.to.type === 'ac') return;
+
   const {x_nm,y_nm}=pxToNm(xPx,yPx);
-  state.measure.toX_nm=x_nm; state.measure.toY_nm=y_nm;
+  // Ensure the new-style shape exists
+  if(!state.measure.from && 'fromX_nm' in state.measure){
+    state.measure = { from:{x_nm:state.measure.fromX_nm, y_nm:state.measure.fromY_nm},
+                      to:{x_nm, y_nm} };
+  }else{
+    state.measure.to = {x_nm, y_nm};
+  }
   drawCanvasOnly();
 });
+
 
 canvas.addEventListener('pointerup', e=>{
   // keep the ruler until RMB/Esc clears or commits; release capture if we had it
