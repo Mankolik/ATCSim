@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>ATC Radar Trainer — v4.5</title>
+<title>ATC Radar Trainer — v4.6</title>
 <style>
   :root{
     --bg:#0a0f14; --grid:#0f1b24; --ring:#123041; --text:#e6f0f7; --accent:#6ad1ff;
@@ -59,9 +59,14 @@
 </head>
 <body>
 <header>
-  <h1>ATC Radar Trainer — v4.2</h1>
+  <h1>ATC Radar Trainer — v4.3</h1>
   <div class="controls">
     <button id="spawn">Spawn traffic</button>
+    <label class="small">
+  <input id="autoSpawnToggle" type="checkbox"> Auto-spawn
+</label>
+<button id="spawnConflict">Spawn conflict</button>
+
     <button id="clear">Clear all</button>
     <button id="pause">Pause</button>
     <label class="small">Range (NM)
@@ -244,6 +249,38 @@ Esc = delete last ruler</div>
   function bearingFromTo(x1,y1,x2,y2){
     return mod360(toDeg(Math.atan2(x2-x1, -(y2-y1))));
   }
+  // --- Short Flight Plan (SFP) & helpers ---
+const DEP_PORTS = ["EPWA","EPKT","EPPO"];   // tweak later
+const ARR_PORTS = ["EDDF","EPWR","EPLL"];   // tweak later
+const TYPES     = ["A320","B738","E190","B744","B789"];
+
+const rand = (a,b)=> a + Math.random()*(b-a);
+const randi = (a,b)=> Math.floor(rand(a,b+1));
+const pick = arr => arr[Math.floor(Math.random()*arr.length)];
+
+function makeSFP({dep=null, dest=null, cruiseFL=360, tasKt=450, type=null}={}){
+  return {
+    dep:  dep  ?? pick(DEP_PORTS),
+    dest: dest ?? pick(ARR_PORTS),
+    cruiseFL, tasKt, type: type ?? pick(TYPES)
+  };
+}
+// Very simple routing: dep → CTR → exit
+function buildDepartureRoute(fp){
+  // pick an outbound exit fix by dest "direction"
+  // (for now random from a set)
+  const exits = [WP.ENE.id, WP.ESE.id, WP.WNW.id, WP.WSW.id, WP.N01.id, WP.S01.id];
+  const exit = exits[Math.floor(Math.random()*exits.length)];
+  return [WP.CTR.id, exit];
+}
+
+// Simple arrival: entry → CTR (then you might handoff below/after CTR)
+function buildArrivalRoute(fp){
+  const entries = [WP.ENE.id, WP.ESE.id, WP.WNW.id, WP.WSW.id, WP.N01.id, WP.S01.id];
+  const entry = entries[Math.floor(Math.random()*entries.length)];
+  return [entry, WP.CTR.id];
+}
+
  function findNearestAcPx(xPx, yPx, tolPx=16){
   let best=null, bestD=Infinity;
   for(const a of state.ac){
@@ -282,6 +319,11 @@ function resolveEndpoint(ep){
       this.hdg=opts.hdg??Math.floor(Math.random()*360);
       this.alt_ft=opts.alt_ft??(30000);
       this.spd_kt=opts.spd_kt??(this.alt_ft>24000?450:250);
+      this.fp = opts.fp ?? null;   // Short Flight Plan (dep, dest, cruiseFL, tasKt, type)
+      this.route = [];         // array of waypoint ids
+      this.routeIdx = 0;       // current active leg target index
+
+
 
       // Dotted trail: last 5 positions max
       this.trail=[]; this.trailMax=5;
@@ -296,9 +338,16 @@ function resolveEndpoint(ep){
 
       // Nav
       this.navMode=null; this.directWptId=null;
+          this.route = [];        // array of waypoint ids
+    this.routeIdx = 0;      // which fix we’re heading to now
+
 
       // Label offsets
       this.labelDx=12; this.labelDy=-16;
+      // Visibility/despawn bookkeeping
+this.seenOnScreenOnce = false;
+this.spawnSec = (typeof simNowSec !== 'undefined') ? simNowSec : 0;
+
 
       // Rect sector state
       this.inSector = true; this.handoffPending=false; this.pendingState=null;
@@ -311,6 +360,13 @@ function resolveEndpoint(ep){
     setMach(m){ this.tgtSpeedMode="MACH"; this.tgtMach=clamp(m,0.3,0.99); }
     directTo(id){ this.navMode="DIRECT"; this.directWptId=id; }
     get mach(){ return this.spd_kt/isaSpeedOfSoundKts(this.alt_ft); }
+      setRoute(ids){
+    this.route = Array.isArray(ids) ? ids.slice() : [];
+    this.routeIdx = 0;
+    this.navMode = this.route.length ? "ROUTE" : null;
+    this.directWptId = null; // clear direct if switching
+  }
+
 
     update(dt, env){
       if(this.tgtSpeedMode==="MACH" && this.tgtMach) this.tgtSpd_kt=this.tgtMach*isaSpeedOfSoundKts(this.alt_ft);
@@ -326,6 +382,25 @@ function resolveEndpoint(ep){
           if(dist<0.5){ this.navMode=null; this.directWptId=null; }
         } else { this.navMode=null; this.directWptId=null; }
       }
+       // ROUTE nav: fly fix to fix
+    if(this.navMode==="ROUTE" && this.routeIdx < this.route.length){
+      const curId = env.getWaypoint(this.route[this.routeIdx]);
+      if(curId){
+        const hdgTo = mod360(toDeg(Math.atan2(curId.x_nm-this.x_nm, -(curId.y_nm-this.y_nm))));
+        this.tgtHdg = hdgTo;
+
+        const dist = Math.hypot(curId.x_nm-this.x_nm, curId.y_nm-this.y_nm);
+        if(dist < 0.8){ // within ~0.8 NM
+          this.routeIdx++;
+          if(this.routeIdx >= this.route.length){
+            this.navMode = null; // route complete
+          }
+        }
+      } else {
+        this.navMode = null; // waypoint missing
+      }
+    }
+
 
       let diff = mod360(this.tgtHdg-this.hdg); if(diff>180) diff-=360;
       const maxTurn=this.turnRateDps*dt; if(Math.abs(diff)<maxTurn) this.hdg=this.tgtHdg; else this.hdg=mod360(this.hdg+Math.sign(diff)*maxTurn);
@@ -347,11 +422,24 @@ function resolveEndpoint(ep){
       this.y_nm += -Math.cos(toRad(this.hdg))*dist_nm;
 
       // Sector (rectangle)
-      const inside = env.inRect(this.x_nm, this.y_nm);
-      if(inside!==this.inSector){
-        if(env.autoHandoff){ this.inSector=inside; this.handoffPending=false; this.pendingState=null; }
-        else { this.handoffPending=true; this.pendingState=inside; }
-      }
+const inside = env.inRect(this.x_nm, this.y_nm);
+if (inside !== this.inSector) {
+  const leftSector = this.inSector && !inside; // just crossed OUT
+  if (env.autoHandoff) {
+    this.inSector = inside;
+    this.handoffPending = false;
+    this.pendingState = null;
+  } else {
+    this.handoffPending = true;
+    this.pendingState = inside;
+  }
+  if (leftSector) {
+    // leaving sector: stop any nav guidance and keep current track
+    this.navMode = null;
+    this.directWptId = null;
+    this.tgtHdg = this.hdg; // hold present heading
+  }
+}
 
       // Dotted trail (every step call adds one); keep only last 5
       this.trail.push({x:this.x_nm,y:this.y_nm});
@@ -375,11 +463,27 @@ window.addEventListener('resize', resize);
 
   let rangeNM=40; function nmToPx(nm){ return nm*(Math.min(W,H)/2)/rangeNM; }
   function pxToNm(xPx,yPx){ return { x_nm:(xPx-cx)*rangeNM/(Math.min(W,H)/2), y_nm:(yPx-cy)*rangeNM/(Math.min(W,H)/2) }; }
+  function isOnScreenPx(x_px, y_px, marginPx=24){
+  return x_px >= -marginPx && x_px <= W + marginPx &&
+         y_px >= -marginPx && y_px <= H + marginPx;
+}
+function acIsOnScreen(a, marginPx=24){
+  const x = cx + nmToPx(a.x_nm);
+  const y = cy + nmToPx(a.y_nm);
+  return isOnScreenPx(x, y, marginPx);
+}
+
+function acInScopeNm(a, marginNm=0){
+  // inside the circular scope radius + margin
+  return Math.hypot(a.x_nm, a.y_nm) <= (rangeNM + marginNm);
+}
+
+
 
   const env = {
     restrict250:true, autoHandoff:true,
     rectW:80, rectH:60,
-    getWaypoint: id=>wpts.find(w=>w.id===id)||null,
+    getWaypoint: id => getWPById(id),
     inRect: (x_nm,y_nm)=>Math.abs(x_nm)<=env.rectW/2 && Math.abs(y_nm)<=env.rectH/2
   };
 
@@ -396,9 +500,80 @@ window.addEventListener('resize', resize);
     measures:[]          // NEW: committed rulers dropped with RMB
   };
   function getSelected(){ return state.ac.find(a=>a.id===state.selectedId)||null; }
+  // --- Sim clock (seconds) ---
+let simNowSec = 0;
+
 
   // Waypoints
   let wptNext=1; const wpts=[];
+  // ---- Random waypoint naming + min-spacing placement ----
+const WPT_MIN_SPACING_NM = 15;     // tweak to taste
+const WPT_TRIES_PER_POINT = 350;  // how hard we try per waypoint
+
+function randWptName(){
+  const vowels = "AEIOU";
+  const cons   = "BCDFGHJKLMNPQRSTVWXYZ";
+  // Make it feel "airway-ish": CVCVC or CVCCV with a dash of weirdness
+  const pat = Math.random() < 0.5 ? "CVCVC" : "CVCCV";
+  const pick = (s)=> s[Math.floor(Math.random()*s.length)];
+  let out = "";
+  for (const c of pat){
+    out += (c==="C") ? pick(cons) : pick(vowels);
+  }
+  // ~15% chance to flip one letter to make it quirky
+  if (Math.random() < 0.15){
+    const i = Math.floor(Math.random()*out.length);
+    const pool = Math.random()<0.5?vowels:cons;
+    out = out.slice(0,i) + pick(pool) + out.slice(i+1);
+  }
+  return out;
+}
+
+function addWaypointNamedAt(name, x_nm, y_nm){
+  const id = wptNext++;
+  const w = { id, name, x_nm, y_nm };
+  wpts.push(w);
+  return w;
+}
+
+/** Place N random waypoints inside the current rectangular sector
+ *  with at least WPT_MIN_SPACING_NM separation.
+ */
+function seedRandomWaypoints(count){
+  const halfW = env.rectW/2, halfH = env.rectH/2;
+  for (let k=0; k<count; k++){
+    let placed = false;
+    let tries = 0;
+    let spacing = WPT_MIN_SPACING_NM;
+
+    while(!placed && tries < WPT_TRIES_PER_POINT){
+      tries++;
+      const x = (Math.random()*2 - 1) * (halfW * 0.95);
+      const y = (Math.random()*2 - 1) * (halfH * 0.95);
+
+      // inside rect (belt-and-suspenders)
+      if (!env.inRect(x,y)) continue;
+
+      // distance check vs all existing waypoints
+      let ok = true;
+      for (const w of wpts){
+        const d = Math.hypot(x - w.x_nm, y - w.y_nm);
+        if (d < spacing){ ok = false; break; }
+      }
+      if (!ok) {
+        // After many misses, ease spacing a bit so we don’t stall
+        if (tries % 50 === 0) spacing *= 0.9;
+        continue;
+      }
+
+      addWaypointNamedAt(randWptName(), x, y);
+      placed = true;
+    }
+  }
+  renderWptList();
+  drawAll();
+}
+
   function addWaypointAt(x_nm,y_nm){ const id=wptNext++; const w={id,name:"WPT"+id,x_nm,y_nm}; wpts.push(w); renderWptList(); drawAll(); }
   function clearWaypoints(){ wpts.length=0; renderWptList(); drawAll(); }
   function renderWptList(){
@@ -417,6 +592,105 @@ window.addEventListener('resize', resize);
       });
     }
   }
+  // ===== Random waypoints inside sector + faint airways =====
+let airways = []; // pairs of waypoint ids to draw lines between
+
+const FUN_FIXES = [
+  "YEETR","BORKD","LOLNO","NOMMY","PIZZA","SAUCE","ZAPPY","FIZZY","BANJO","NINJA",
+  "TANGO","NACHO","BAGEL","WAFFL","DONUT","BINGO","CHILL","HAPPY","GRUMP","ZORRO",
+  "BEEFY","NOODS","SPICY","MUNCH","CRONK","GOOFY","SNEKD","WHAAA","YUMMY","BUBBL"
+];
+const VOWELS = ["A","E","I","O","U","Y"];
+const CONS   = ["B","C","D","F","G","H","J","K","L","M","N","P","Q","R","S","T","V","W","X","Z"];
+const usedFixNames = new Set();
+
+function genFunnyFixName(){
+  // prefer from list without reusing
+  const candidates = FUN_FIXES.filter(n => !usedFixNames.has(n));
+  if (candidates.length){
+    const n = candidates[Math.floor(Math.random()*candidates.length)];
+    usedFixNames.add(n);
+    return n;
+  }
+  // fallback: make something pronounceable(ish) CCVCV
+  const pick = arr => arr[Math.floor(Math.random()*arr.length)];
+  const name = (pick(CONS)+pick(CONS)+pick(VOWELS)+pick(CONS)+pick(VOWELS)).toUpperCase();
+  usedFixNames.add(name);
+  return name;
+}
+
+// Seed N random waypoints inside current rectangular sector
+function seedWaypointsInside(count=12, minSepNm=6){
+  const halfW = env.rectW/2, halfH = env.rectH/2;
+  const margin = 4; // keep a little away from the edge
+
+  function tooClose(x_nm,y_nm){
+    return wpts.some(w => Math.hypot(w.x_nm - x_nm, w.y_nm - y_nm) < minSepNm);
+  }
+
+  for(let i=0;i<count;i++){
+    let tries=0, x=0, y=0;
+    do{
+      x = (Math.random()*2-1) * (halfW - margin);
+      y = (Math.random()*2-1) * (halfH - margin);
+      tries++;
+    } while(tries<40 && tooClose(x,y));
+
+    const id = wptNext++;
+    const w = { id, name: genFunnyFixName(), x_nm:x, y_nm:y };
+    wpts.push(w);
+  }
+  renderWptList();
+}
+
+// Build “airways” by connecting each waypoint to its k nearest neighbors
+function buildAirways(k=2){
+  const byId = new Map(wpts.map(w=>[w.id,w]));
+  const uniq = new Set(); // store "min-max" string keys
+  for(const a of wpts){
+    const dists = [];
+    for(const b of wpts){
+      if (a.id===b.id) continue;
+      dists.push([b.id, Math.hypot(a.x_nm-b.x_nm, a.y_nm-b.y_nm)]);
+    }
+    dists.sort((p,q)=>p[1]-q[1]);
+    for(let i=0;i<Math.min(k,dists.length);i++){
+      const bId = dists[i][0];
+      const key = a.id < bId ? `${a.id}-${bId}` : `${bId}-${a.id}`;
+      uniq.add(key);
+    }
+  }
+  airways = Array.from(uniq).map(s => s.split('-').map(n=>parseInt(n,10)));
+}
+
+  
+  // === Named waypoints & airways (static catalog) ===
+const WP = {
+  CTR: { id: 1000, name: "CTR", x_nm: 0, y_nm: 0 },        // center point
+  ENE: { id: 1001, name: "ENE", x_nm:  22, y_nm: -30 },
+  ESE: { id: 1002, name: "ESE", x_nm:  32, y_nm:  18 },
+  WNW: { id: 1003, name: "WNW", x_nm: -34, y_nm: -12 },
+  WSW: { id: 1004, name: "WSW", x_nm: -30, y_nm:  20 },
+  N01: { id: 1005, name: "N01", x_nm:   0, y_nm: -40 },
+  S01: { id: 1006, name: "S01", x_nm:   0, y_nm:  40 }
+};
+// Make an immutable array for drawing labels if you want
+const WP_ALL = Object.values(WP);
+
+// Airways are pairs of waypoint ids (segments)
+const AIRWAYS = [
+  [WP.WNW.id, WP.CTR.id], [WP.CTR.id, WP.ENE.id],
+  [WP.WSW.id, WP.CTR.id], [WP.CTR.id, WP.ESE.id],
+  [WP.N01.id, WP.CTR.id], [WP.CTR.id, WP.S01.id],
+];
+
+
+// helper
+function getWPById(id){
+  // prefer dynamic wpts the user added, then static catalog
+  return wpts.find(w=>w.id===id) || WP_ALL.find(w=>w.id===id) || null;
+}
+
 
 // Put this near your other globals (above spawnAircraft)
 const SPAWN = {
@@ -425,6 +699,125 @@ const SPAWN = {
   marginNM: 6,     // how far outside the sector to spawn
   jitterDeg: 45    // ± jitter to avoid perfectly cardinal inbounds
 };
+
+// --- Auto spawner (cooldown-based; guarantees ≤1 spawn per tick) ---
+const AutoSpawn = {
+  enabled: false,
+  cooldownSec: Infinity,   // counts down while enabled; Infinity when disabled
+  minGap: 45,
+  maxGap: 65,
+  conflictChance: 0.15
+};
+function randGap(){
+  return AutoSpawn.minGap + Math.random()*(AutoSpawn.maxGap - AutoSpawn.minGap);
+}
+function armCooldown(){ AutoSpawn.cooldownSec = randGap(); }
+function disarmCooldown(){ AutoSpawn.cooldownSec = Infinity; }
+
+// Spawn with explicit params + SFP
+function spawnWithParams({x_nm,y_nm,hdg,alt_ft,spd_kt, jitterDeg=0}, fp=null){
+  const a = new Aircraft({ x_nm, y_nm, hdg, alt_ft, spd_kt, fp });
+  if (jitterDeg) hdg = mod360(hdg + rand(-jitterDeg, +jitterDeg));
+  a.setHeading(hdg);
+  a.inSector = env.inRect(a.x_nm, a.y_nm);
+  if (fp) {
+  // heuristic: if starting outside sector -> arrival; else departure
+  const isOutside = !env.inRect(x_nm, y_nm);
+  const route = isOutside ? buildArrivalRoute(fp) : buildDepartureRoute(fp);
+  a.setRoute(route);
+}
+
+  state.ac.push(a);
+  state.selectedId = a.id;
+  flashSelected(); updateSelectedPanel(); drawAll();
+  return a;
+}
+
+// Spawn a normal planned aircraft (arrival or departure)
+function spawnPlannedAircraft(){
+  const halfW = env.rectW/2, halfH = env.rectH/2, m = SPAWN.marginNM;
+
+  // 60% arrivals (edge → center-ish), 40% departures (center-ish → edge)
+  const isArrival = Math.random() < 0.6;
+
+  // Choose alt (cruise band)
+  const tMin = Math.floor(SPAWN.flMin/10);
+  const tMax = Math.floor(SPAWN.flMax/10);
+  const FL   = (tMin + randi(0, tMax - tMin))*10;
+  const alt  = FL*100;
+  const spd  = 420 + Math.random()*70;
+
+  const fp = makeSFP({ cruiseFL: FL, tasKt: Math.round(spd) });
+
+  if (isArrival){
+    // pick an edge and head roughly toward center
+    const side = randi(0,3);
+    let x=0,y=0,hdg=0;
+    if (side===0){ y=-(halfH+m); x=rand(-halfW*0.9, halfW*0.9); hdg=180; }
+    else if(side===1){ x=(halfW+m); y=rand(-halfH*0.9, halfH*0.9); hdg=270; }
+    else if(side===2){ y=(halfH+m); x=rand(-halfW*0.9, halfW*0.9); hdg=0; }
+    else { x=-(halfW+m); y=rand(-halfH*0.9, halfH*0.9); hdg=90; }
+    // small jitter to avoid perfect lines
+    hdg = mod360(hdg + rand(-SPAWN.jitterDeg, SPAWN.jitterDeg));
+    return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd}, fp);
+  } else {
+    // departure: spawn near center pointing out
+    const ang = Math.random()*Math.PI*2;
+    const r   = rand(0, Math.min(halfW, halfH)*0.25); // within inner 25%
+    const x   = Math.sin(ang)*r;
+    const y   = -Math.cos(ang)*r;
+    // heading away from center
+    const hdg = mod360(toDeg(Math.atan2(x - 0, -(y - 0))));
+    return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd}, fp);
+  }
+}
+
+// Spawn a conflict pack (pair or triple) that will converge near center
+function spawnConflictPack(useRoutes=false){
+  const halfW = env.rectW/2, halfH = env.rectH/2, m = SPAWN.marginNM;
+
+  // Same level for all units in the pack
+  const tMin = Math.floor(SPAWN.flMin/10);
+  const tMax = Math.floor(SPAWN.flMax/10);
+  const FL   = (tMin + randi(0, tMax - tMin))*10;
+  const alt  = FL*100;
+  const spd1 = 430 + Math.random()*60;
+  const spd2 = 430 + Math.random()*60;
+
+  // Choose axis pair (E↔W or N↔S) so they cross the middle
+  const EW = Math.random() < 0.5;
+  
+    const fpArg = useRoutes ? makeSFP({cruiseFL:FL}) : null;
+
+
+  if (EW){
+    // One from West → East, one from East → West, slight vertical offset
+    const y = rand(-halfH*0.6, halfH*0.6);
+    spawnWithParams({ x_nm:-(halfW+m), y_nm:y+rand(-4, +4), hdg:90+rand(-10,10), alt_ft:alt, spd_kt:spd1 }, fpArg);
+    spawnWithParams({ x_nm:(halfW+m),  y_nm:y+rand(-4, +4), hdg:270+rand(-10,10),alt_ft:alt, spd_kt:spd2 }, fpArg);
+
+
+  } else {
+    // One from North → South, one from South → North
+    const x = rand(-halfW*0.6, halfW*0.6);
+    spawnWithParams({ x_nm:x+rand(-4,+4), y_nm:-(halfH+m), hdg:180+rand(-10,10), alt_ft:alt, spd_kt:spd1 }, fpArg);
+    spawnWithParams({ x_nm:x+rand(-4,+4), y_nm:(halfH+m),  hdg:0+rand(-10,10),   alt_ft:alt, spd_kt:spd2 }, fpArg);
+
+  }
+
+  // 30% chance add a third crosser to spice it up
+  if (Math.random() < 0.30){
+    const hdg = randi(0,3)*90 + rand(-20,20);
+    const side = randi(0,3);
+    let x=0,y=0;
+    if (side===0){ y=-(halfH+m); x=rand(-halfW*0.9, halfW*0.9); }
+    else if(side===1){ x=(halfW+m); y=rand(-halfH*0.9, halfH*0.9); }
+    else if(side===2){ y=(halfH+m); x=rand(-halfW*0.9, halfW*0.9); }
+    else { x=-(halfW+m); y=rand(-halfH*0.9, halfH*0.9); }
+    spawnWithParams({ x_nm:x, y_nm:y, hdg, alt_ft:alt, spd_kt: 430+Math.random()*60 }, fpArg);
+  }
+}
+
 
  function spawnAircraft(){
   // Choose a sector edge to spawn from: 0=N, 1=E, 2=S, 3=W
@@ -456,6 +849,8 @@ const SPAWN = {
       hdg = 90;
       break;
   }
+
+
 
   // Add a little randomization so they’re not laser-straight
   hdg = mod360(hdg + (Math.random()*SPAWN.jitterDeg*2 - SPAWN.jitterDeg));
@@ -588,12 +983,20 @@ const SPAWN = {
       if(a.id===state.selectedId) tag.style.borderColor="#367a4d"; else tag.style.borderColor="";
       const ho = a.handoffPending ? ` <span class="pill">H/O ${a.pendingState?'IN':'OUT'}</span>` : "";
       const sec = a.inSector ? "IN" : "OUT";
-      tag.innerHTML = `
-        <div class="line1">${a.cs} <span class="pill">SEC:${sec}</span>${ho}</div>
-        <div class="line2">HDG ${formatHeading(a.hdg)} • ${a.spd_kt|0}kt • ${a.alt_ft>=18000?('FL'+String(Math.round(a.alt_ft/100)).padStart(3,'0')):((a.alt_ft|0)+' ft')} • M ${a.mach.toFixed(2)} • VS ${a.vs_fpm|0}</div>
-      `;
+      const rte = (a.navMode==="ROUTE" && a.route.length)
+  ? ` • RTE ${Math.min(a.routeIdx+1,a.route.length)}/${a.route.length}`
+  : "";
+tag.innerHTML = `
+  <div class="line1">${a.cs} <span class="pill">SEC:${sec}</span>${ho}</div>
+  <div class="line2">HDG ${formatHeading(a.hdg)} • ${a.spd_kt|0}kt • ${
+    a.alt_ft>=18000 ? ('FL'+String(Math.round(a.alt_ft/100)).padStart(3,'0')) : ((a.alt_ft|0)+' ft')
+  } • M ${a.mach.toFixed(2)} • VS ${a.vs_fpm|0}${rte}</div>
+`;
+
       tag.style.left=(x+a.labelDx)+'px'; tag.style.top=(y+a.labelDy)+'px';
     }
+    
+
     // Remove tags for AC that no longer exist
     for(const [id,el] of tagMap.entries()){
       if(!presentIds.has(Number(id))){ el.remove(); tagMap.delete(id); }
@@ -641,14 +1044,47 @@ const SPAWN = {
       ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x,y); ctx.stroke();
     }
   }
+  
+function drawAirways(){
+  ctx.save();
+  ctx.strokeStyle = "rgba(150, 200, 255, 0.5)";
+  ctx.lineWidth = 1.2;
+  ctx.setLineDash([2,10]);
+  for(const [a,b] of AIRWAYS){
+    const A = getWPById(a), B = getWPById(b);
+    if(!A || !B) continue;
+    const x1 = cx + nmToPx(A.x_nm), y1 = cy + nmToPx(A.y_nm);
+    const x2 = cx + nmToPx(B.x_nm), y2 = cy + nmToPx(B.y_nm);
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+  }
+  ctx.restore();
+}
 
   function drawWaypointsCrosses(){
-    for(const w of wpts){
-      const x=cx+nmToPx(w.x_nm), y=cy+nmToPx(w.y_nm);
-      ctx.strokeStyle="#ff7bff"; ctx.lineWidth=1.2;
-      ctx.beginPath(); ctx.moveTo(x-6,y); ctx.lineTo(x+6,y); ctx.moveTo(x,y-6); ctx.lineTo(x,y+6); ctx.stroke();
-    }
+  // Airways (faint lines first)
+  ctx.strokeStyle = "rgba(150, 200, 255, 0.5)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4,8]); // faint dashed
+  ctx.beginPath();
+  for(const [aId,bId] of airways){
+    const a = wpts.find(w=>w.id===aId);
+    const b = wpts.find(w=>w.id===bId);
+    if(!a||!b) continue;
+    const x1 = cx + nmToPx(a.x_nm), y1 = cy + nmToPx(a.y_nm);
+    const x2 = cx + nmToPx(b.x_nm), y2 = cy + nmToPx(b.y_nm);
+    ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
   }
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Waypoint crosses on top
+  for(const w of wpts){
+    const x=cx+nmToPx(w.x_nm), y=cy+nmToPx(w.y_nm);
+    ctx.strokeStyle="#ff7bff"; ctx.lineWidth=1.2;
+    ctx.beginPath(); ctx.moveTo(x-6,y); ctx.lineTo(x+6,y); ctx.moveTo(x,y-6); ctx.lineTo(x,y+6); ctx.stroke();
+  }
+}
+
 
   function drawConflicts(){
     for(const [aId,bId] of state.conflictsPred){
@@ -699,8 +1135,22 @@ function drawMeasureSegment(m){
   ctx.fillStyle="#cfe8f7"; ctx.fillText(text, midx - w/2 + pad, midy - 8 + pad + 12 - 2);
 }
 
-function drawActiveMeasure(){ if(state.measure) drawMeasureSegment(state.measure); }
-function drawRulers(){ for(const m of state.measures) drawMeasureSegment(m); }
+function drawActiveMeasure(){
+  if(!state.measure) return;
+  ctx.save();
+  ctx.globalAlpha = 1;      // don’t inherit any dimming
+  ctx.setLineDash([]);      // don’t inherit dashes
+  drawMeasureSegment(state.measure);
+  ctx.restore();
+}
+function drawRulers(){
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.setLineDash([]);
+  for(const m of state.measures) drawMeasureSegment(m);
+  ctx.restore();
+}
+
 
 // NEW: Shift+Left click handler — snaps to aircraft (live) or uses free point.
 function handleMeasureSmartClick(xPx, yPx){
@@ -724,6 +1174,7 @@ function handleMeasureSmartClick(xPx, yPx){
 
   function drawCanvasBase(){
     drawScope();
+    drawAirways();
     drawWaypointsCrosses();
     detectConflicts();
 
@@ -780,14 +1231,58 @@ function handleMeasureSmartClick(xPx, yPx){
     drawActiveMeasure();
   }
 
-  // ---------- Simulation (3s refresh) ----------
-  function stepOnce(){
-    if(state.paused){ drawCanvasOnly(); return; }
-    const dt = state.refreshSec * state.simSpeed;
-    for(const a of state.ac) a.update(dt, env);
-    drawAll();
+// ---------- Simulation (3s refresh) ----------
+function stepOnce(){
+  if(state.paused){ 
+    drawCanvasOnly(); 
+    return; 
   }
-  let timer = setInterval(stepOnce, 3000);
+
+  // advance sim clock
+  simNowSec += state.refreshSec * state.simSpeed;
+  const dt = state.refreshSec * state.simSpeed;
+
+  // move all aircraft
+  for(const a of state.ac) a.update(dt, env);
+  // Mark seen-once and cull only after they actually appeared
+for (const a of state.ac) {
+  if (acInScopeNm(a, 0)) a.seenOnScreenOnce = true;
+}
+
+const TTL_NEVER_SEEN_SEC = 180; // safety: if something never appears in 3 min, drop it
+state.ac = state.ac.filter(a => {
+  if (!a.seenOnScreenOnce) {
+    // Keep until it appears, unless TTL expires (or it has already entered)
+    return (simNowSec - a.spawnSec) < TTL_NEVER_SEEN_SEC || acInScopeNm(a, 0);
+  }
+  // Once seen at least once, despawn after it leaves the scope by 8 NM
+  return acInScopeNm(a, 8);
+});
+
+if (state.selectedId && !state.ac.some(a => a.id === state.selectedId)) {
+  state.selectedId = null;
+}
+
+
+// auto-spawn (cooldown)
+if (AutoSpawn.enabled && Number.isFinite(AutoSpawn.cooldownSec)) {
+  AutoSpawn.cooldownSec -= dt;        // dt = state.refreshSec * state.simSpeed
+  if (AutoSpawn.cooldownSec <= 0) {
+    if (Math.random() < AutoSpawn.conflictChance) {
+  spawnConflictPack(true);   // routed conflicts for autos
+} else {
+  spawnPlannedAircraft();    // routed singles for autos
+}
+
+    armCooldown();                    // reset for next randomized gap
+  }
+}
+
+
+  drawAll();
+}
+let timer = setInterval(stepOnce, 3000);
+
 
   // ---------- UI ----------
   const altInput=document.getElementById('alt'); const useFL=document.getElementById('useFL'); const altHint=document.getElementById('altModeHint');
@@ -895,6 +1390,20 @@ canvas.addEventListener('contextmenu', e=>{
   }
 
   document.getElementById('spawn').addEventListener('click', spawnAircraft);
+  document.getElementById('autoSpawnToggle').addEventListener('change', e=>{
+  AutoSpawn.enabled = e.target.checked;
+  if (AutoSpawn.enabled){
+    armCooldown();      // start a fresh randomized gap
+  } else {
+    disarmCooldown();   // stop any pending spawn
+  }
+});
+
+
+document.getElementById('spawnConflict').addEventListener('click', ()=>{
+  spawnConflictPack();
+});
+
   document.getElementById('clear').addEventListener('click', clearAll);
   document.getElementById('pause').addEventListener('click', e=>{
     state.paused=!state.paused; e.target.textContent=state.paused?"Resume":"Pause";
@@ -1000,6 +1509,8 @@ canvas.addEventListener('contextmenu', e=>{
 window.addEventListener('load', () => {
   resize();            // compute sizes once
   renderWptList();
+  seedWaypointsInside(9);   // tweak the number if you want more/less
+  buildAirways(2);           // connect each fix to 2 nearest neighbors
   spawnAircraft();
   spawnAircraft();
   booted = true;       // now future resizes can redraw
