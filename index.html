@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>ATC Radar Trainer — v4.6</title>
+<title>ATC Radar Trainer — v5.0</title>
 <style>
   :root{
     --bg:#0a0f14; --grid:#0f1b24; --ring:#123041; --text:#e6f0f7; --accent:#6ad1ff;
@@ -55,11 +55,33 @@
   .tag.warn{border-color:var(--warn)}
   .pill{padding:2px 6px; border:1px solid #2c4a5f; border-radius:999px; background:#0c1b25; font-size:11px; color:var(--muted)}
   .waypointLabel{position:absolute; background:#0b1620; border:1px solid #2c4a5f; border-radius:6px; padding:2px 6px; font-size:12px; color:#cde; opacity:.85}
+  /* --- SFP floating window --- */
+.sfpWin{
+  position:absolute; right:12px; top:64px; width:260px;
+  background:#0b1620; border:1px solid #1b3a4f; border-radius:10px;
+  box-shadow:0 6px 18px rgba(0,0,0,.35); z-index:20; user-select:none;
+}
+.sfpWin .hdr{
+  display:flex; align-items:center; justify-content:space-between;
+  padding:8px 10px; border-bottom:1px solid #173243; color:#9fb3c1; font-size:12px;
+  background:linear-gradient(180deg,#0e1820,#0b141a);
+  border-top-left-radius:10px; border-top-right-radius:10px;
+}
+.sfpWin .hdr .title{ font-weight:600; color:#cfe8f7; font-size:12px; letter-spacing:.3px }
+.sfpWin .hdr button{
+  background:#0d1a22; border:1px solid #274b64; color:#cfe8f7; padding:4px 8px; border-radius:6px; cursor:pointer;
+}
+.sfpWin .body{ padding:10px }
+.sfpWin table{ width:100%; border-collapse:collapse; font-size:12px; color:#cfe8f7 }
+.sfpWin td{ padding:4px 0; vertical-align:top }
+.sfpWin td.key{ color:#9fb3c1; width:88px }
+.sfpWin .route{ margin-top:8px; font-size:12px; color:#9ad6ff; line-height:1.35 }
+
 </style>
 </head>
 <body>
 <header>
-  <h1>ATC Radar Trainer — v4.3</h1>
+  <h1>ATC Radar Trainer — v5.0</h1>
   <div class="controls">
     <button id="spawn">Spawn traffic</button>
     <label class="small">
@@ -265,14 +287,19 @@ function makeSFP({dep=null, dest=null, cruiseFL=360, tasKt=450, type=null}={}){
     cruiseFL, tasKt, type: type ?? pick(TYPES)
   };
 }
-// Very simple routing: dep → CTR → exit
+// Departures: usually inner fix → exit (rarely CTR → exit)
 function buildDepartureRoute(fp){
-  // pick an outbound exit fix by dest "direction"
-  // (for now random from a set)
-  const exits = [WP.ENE.id, WP.ESE.id, WP.WNW.id, WP.WSW.id, WP.N01.id, WP.S01.id];
-  const exit = exits[Math.floor(Math.random()*exits.length)];
-  return [WP.CTR.id, exit];
+  const exit = randomEdge(null);
+  if (Math.random() < ROUTE_CFG.goViaCTRProb) return [WP.CTR.id, exit];
+
+  // start near center: sometimes go via a non-CTR inner fix, sometimes straight out
+  if (Math.random() < ROUTE_CFG.addMidProb) {
+    const inner = pickInnerFixId();
+    if (inner !== WP.CTR.id) return [inner, exit];
+  }
+  return [exit]; // straight to exit
 }
+
 
 // Simple arrival: entry → CTR (then you might handoff below/after CTR)
 function buildArrivalRoute(fp){
@@ -280,6 +307,17 @@ function buildArrivalRoute(fp){
   const entry = entries[Math.floor(Math.random()*entries.length)];
   return [entry, WP.CTR.id];
 }
+// Transit: entry → (usually inner fix) → exit (not same as entry)
+function buildTransitRoute(fp){
+  const entry = randomEdge(null);
+  if (Math.random() < ROUTE_CFG.goViaCTRProb) return [entry, WP.CTR.id];
+
+  const inner = pickInnerFixId();
+  const exit  = randomEdge(entry);
+  if (inner !== WP.CTR.id) return [entry, inner, exit];
+  return [entry, exit];
+}
+
 
  function findNearestAcPx(xPx, yPx, tolPx=16){
   let best=null, bestD=Infinity;
@@ -592,6 +630,63 @@ function seedRandomWaypoints(count){
       });
     }
   }
+  function fmtFL(flFt){ return 'FL' + String(Math.round(flFt/100)).padStart(3,'0'); }
+function fmtTas(kt){ return (kt|0) + " kt"; }
+
+function ensureSfpWin(){
+  let el = document.querySelector('.sfpWin');
+  if(el) return el;
+  el = document.createElement('div');
+  el.className = 'sfpWin';
+  el.innerHTML = `
+    <div class="hdr">
+      <div class="title">Short Flight Plan</div>
+      <div>
+        <button class="btnSfpClose">Close</button>
+      </div>
+    </div>
+    <div class="body"></div>
+  `;
+  document.getElementById('radarWrap').appendChild(el);
+  el.querySelector('.btnSfpClose').addEventListener('click', closeSFP);
+  return el;
+}
+
+function renderSFP(ac){
+  const el = ensureSfpWin();
+  const body = el.querySelector('.body');
+  if(!ac || !ac.fp){
+    body.innerHTML = `<div class="small" style="color:#9fb3c1">No SFP for this aircraft.</div>`;
+    return;
+  }
+  const fp = ac.fp;
+  const routeNames = (ac.route||[]).map(id => (env.getWaypoint(id)?.name || String(id)));
+  body.innerHTML = `
+    <table>
+      <tr><td class="key">Callsign</td><td>${ac.cs}</td></tr>
+      <tr><td class="key">Type</td><td>${fp.type || '—'}</td></tr>
+      <tr><td class="key">From</td><td>${fp.dep || '—'}</td></tr>
+      <tr><td class="key">To</td><td>${fp.dest || '—'}</td></tr>
+      <tr><td class="key">Cruise</td><td>${fmtFL(fp.cruiseFL*100)}</td></tr>
+      <tr><td class="key">TAS</td><td>${fmtTas(fp.tasKt||ac.spd_kt)}</td></tr>
+    </table>
+    <div class="route"><span style="color:#9fb3c1">Route:</span> ${
+      routeNames.length ? routeNames.join(' → ') : '—'
+    }</div>
+  `;
+  // keep it on-screen if window is small
+  const r = el.getBoundingClientRect(), wrapR = document.getElementById('radarWrap').getBoundingClientRect();
+  if(r.right > wrapR.right) el.style.right = '12px';
+  if(r.top < wrapR.top) el.style.top = '64px';
+}
+
+function openSFP(ac){ renderSFP(ac); }
+function closeSFP(){
+  const el = document.querySelector('.sfpWin');
+  if(el) el.remove();
+}
+
+  
   // ===== Random waypoints inside sector + faint airways =====
 let airways = []; // pairs of waypoint ids to draw lines between
 
@@ -690,6 +785,25 @@ function getWPById(id){
   // prefer dynamic wpts the user added, then static catalog
   return wpts.find(w=>w.id===id) || WP_ALL.find(w=>w.id===id) || null;
 }
+// ---- Routing config + helpers (avoid dogpiling CTR) ----
+const EDGE_FIXES = [WP.ENE.id, WP.ESE.id, WP.WNW.id, WP.WSW.id, WP.N01.id, WP.S01.id];
+
+const ROUTE_CFG = {
+  goViaCTRProb: 0.00,     // 20% still via CTR; set 0 to ban it
+  innerRadiusNm: 16,      // pick a dynamic fix within this radius of center
+  addMidProb: 0.3         // chance to include an inner mid-fix on transits/deps
+};
+
+function pickInnerFixId(radiusNm = ROUTE_CFG.innerRadiusNm){
+  const cands = wpts.filter(w => Math.hypot(w.x_nm, w.y_nm) <= radiusNm);
+  if (cands.length) return cands[Math.random()*cands.length|0].id;
+  return WP.CTR.id; // fallback if no dynamic waypoints exist yet
+}
+
+function randomEdge(excludeId=null){
+  const opts = EDGE_FIXES.filter(id => id !== excludeId);
+  return opts[Math.random()*opts.length|0];
+}
 
 
 // Put this near your other globals (above spawnAircraft)
@@ -714,18 +828,25 @@ function randGap(){
 function armCooldown(){ AutoSpawn.cooldownSec = randGap(); }
 function disarmCooldown(){ AutoSpawn.cooldownSec = Infinity; }
 
-// Spawn with explicit params + SFP
-function spawnWithParams({x_nm,y_nm,hdg,alt_ft,spd_kt, jitterDeg=0}, fp=null){
+// routeMode can be 'arrival' | 'departure' | 'transit' | null
+function spawnWithParams({x_nm,y_nm,hdg,alt_ft,spd_kt, jitterDeg=0, routeMode=null}, fp=null){
   const a = new Aircraft({ x_nm, y_nm, hdg, alt_ft, spd_kt, fp });
   if (jitterDeg) hdg = mod360(hdg + rand(-jitterDeg, +jitterDeg));
   a.setHeading(hdg);
   a.inSector = env.inRect(a.x_nm, a.y_nm);
+
   if (fp) {
-  // heuristic: if starting outside sector -> arrival; else departure
-  const isOutside = !env.inRect(x_nm, y_nm);
-  const route = isOutside ? buildArrivalRoute(fp) : buildDepartureRoute(fp);
-  a.setRoute(route);
-}
+    let mode = routeMode;
+    if (!mode) {
+      // backward-compat heuristic if no mode provided
+      mode = (!env.inRect(x_nm, y_nm)) ? 'arrival' : 'departure';
+    }
+    let route;
+    if (mode === 'transit')      route = buildTransitRoute(fp);
+    else if (mode === 'arrival') route = buildArrivalRoute(fp);
+    else                         route = buildDepartureRoute(fp);
+    a.setRoute(route);
+  }
 
   state.ac.push(a);
   state.selectedId = a.id;
@@ -733,44 +854,56 @@ function spawnWithParams({x_nm,y_nm,hdg,alt_ft,spd_kt, jitterDeg=0}, fp=null){
   return a;
 }
 
-// Spawn a normal planned aircraft (arrival or departure)
+
 function spawnPlannedAircraft(){
   const halfW = env.rectW/2, halfH = env.rectH/2, m = SPAWN.marginNM;
 
-  // 60% arrivals (edge → center-ish), 40% departures (center-ish → edge)
-  const isArrival = Math.random() < 0.6;
+  // --- choose mode (weights) ---
+  const wTransit=0.60, wArrival=0.20, wDepart=0.20; // tweak to taste
+  const r = Math.random();
+  let mode = 'transit';
+  if (r < wTransit) mode = 'transit';
+  else if (r < wTransit + wArrival) mode = 'arrival';
+  else mode = 'departure';
 
-  // Choose alt (cruise band)
+  // Choose alt/speed & SFP
   const tMin = Math.floor(SPAWN.flMin/10);
   const tMax = Math.floor(SPAWN.flMax/10);
   const FL   = (tMin + randi(0, tMax - tMin))*10;
   const alt  = FL*100;
   const spd  = 420 + Math.random()*70;
+  const fp   = makeSFP({ cruiseFL: FL, tasKt: Math.round(spd) });
 
-  const fp = makeSFP({ cruiseFL: FL, tasKt: Math.round(spd) });
-
-  if (isArrival){
-    // pick an edge and head roughly toward center
-    const side = randi(0,3);
-    let x=0,y=0,hdg=0;
-    if (side===0){ y=-(halfH+m); x=rand(-halfW*0.9, halfW*0.9); hdg=180; }
-    else if(side===1){ x=(halfW+m); y=rand(-halfH*0.9, halfH*0.9); hdg=270; }
-    else if(side===2){ y=(halfH+m); x=rand(-halfW*0.9, halfW*0.9); hdg=0; }
-    else { x=-(halfW+m); y=rand(-halfH*0.9, halfH*0.9); hdg=90; }
-    // small jitter to avoid perfect lines
-    hdg = mod360(hdg + rand(-SPAWN.jitterDeg, SPAWN.jitterDeg));
-    return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd}, fp);
-  } else {
-    // departure: spawn near center pointing out
+  if (mode === 'departure'){
+    // spawn near center pointing out
     const ang = Math.random()*Math.PI*2;
-    const r   = rand(0, Math.min(halfW, halfH)*0.25); // within inner 25%
+    const r   = rand(0, Math.min(halfW, halfH)*0.25);
     const x   = Math.sin(ang)*r;
     const y   = -Math.cos(ang)*r;
-    // heading away from center
-    const hdg = mod360(toDeg(Math.atan2(x - 0, -(y - 0))));
-    return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd}, fp);
+    const hdg = mod360(toDeg(Math.atan2(x, -y)));
+    return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd, routeMode:'departure'}, fp);
+  }
+
+  // edge spawns share similar logic
+  const side = randi(0,3);
+  let x=0,y=0,baseHdg=0;
+  if (side===0){ y=-(halfH+m); x=rand(-halfW*0.9, halfW*0.9); baseHdg=180; }
+  else if(side===1){ x=(halfW+m); y=rand(-halfH*0.9, halfH*0.9); baseHdg=270; }
+  else if(side===2){ y=(halfH+m); x=rand(-halfW*0.9, halfW*0.9); baseHdg=0; }
+  else { x=-(halfW+m); y=rand(-halfH*0.9, halfH*0.9); baseHdg=90; }
+
+  // small jitter to avoid perfect lines
+  const hdg = mod360(baseHdg + rand(-SPAWN.jitterDeg, SPAWN.jitterDeg));
+
+  if (mode === 'arrival'){
+    // treat as arrival route (could still avoid CTR per your ROUTE_CFG)
+    return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd, routeMode:'arrival'}, fp);
+  } else {
+    // true transit: edge -> inner/exit (route builder ensures exit ≠ entry)
+    return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd, routeMode:'transit'}, fp);
   }
 }
+
 
 // Spawn a conflict pack (pair or triple) that will converge near center
 function spawnConflictPack(useRoutes=false){
@@ -1107,33 +1240,54 @@ function drawAirways(){
 // Backward compatibility: we still render old {fromX_nm, toX_nm, ...} shapes.
 
 function drawMeasureSegment(m){
+  ctx.save();
+
   // Resolve endpoints (support both new and legacy shapes)
   const p1 = m.from ? resolveEndpoint(m.from) : {x_nm:m.fromX_nm, y_nm:m.fromY_nm};
   const p2 = m.to   ? resolveEndpoint(m.to)   : {x_nm:m.toX_nm,   y_nm:m.toY_nm};
-  if(!p1 || !p2) return; // one endpoint missing (e.g., a/c deleted)
+  if(!p1 || !p2){ ctx.restore(); return; }
 
   const x1 = cx + nmToPx(p1.x_nm), y1 = cy + nmToPx(p1.y_nm);
   const x2 = cx + nmToPx(p2.x_nm), y2 = cy + nmToPx(p2.y_nm);
 
   // line
-  ctx.strokeStyle="#9ad6ff"; ctx.lineWidth=1.8; ctx.setLineDash([8,6]);
-  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); ctx.setLineDash([]);
+  ctx.strokeStyle="#9ad6ff";
+  ctx.lineWidth=1.8;
+  ctx.setLineDash([8,6]);
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+  ctx.setLineDash([]);
 
   // endpoints
-  ctx.fillStyle="#e6f0f7"; ctx.beginPath(); ctx.arc(x1,y1,3,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle="#e6f0f7";
+  ctx.beginPath(); ctx.arc(x1,y1,3,0,Math.PI*2); ctx.fill();
   ctx.beginPath(); ctx.arc(x2,y2,3,0,Math.PI*2); ctx.fill();
 
-  // label at midpoint
+  // label text (no box): place slightly "above" the segment midpoint
   const dnm = Math.hypot(p2.x_nm-p1.x_nm, p2.y_nm-p1.y_nm);
   const brg = bearingFromTo(p1.x_nm,p1.y_nm,p2.x_nm,p2.y_nm);
-  const midx = (x1+x2)/2, midy = (y1+y2)/2;
   const text = `${dnm.toFixed(1)} NM • HDG ${formatHeading(brg)}`;
-  ctx.font="12px ui-monospace"; const pad=4;
-  const w = ctx.measureText(text).width + pad*2, h=16+pad*2;
-  ctx.fillStyle="rgba(10,15,20,0.85)"; ctx.fillRect(midx-w/2, midy- h -8, w, h);
-  ctx.strokeStyle="#274b64"; ctx.lineWidth=1; ctx.strokeRect(midx-w/2, midy- h -8, w, h);
-  ctx.fillStyle="#cfe8f7"; ctx.fillText(text, midx - w/2 + pad, midy - 8 + pad + 12 - 2);
+
+  const midx = (x1+x2)/2, midy = (y1+y2)/2;
+  // screen-space normal (perpendicular) for offset
+  const nx = (y2 - y1), ny = -(x2 - x1);
+  const nlen = Math.hypot(nx, ny) || 1;
+  const off = 14; // how far above the line (px)
+  const tx = midx + (nx / nlen) * off;
+  const ty = midy + (ny / nlen) * off;
+
+  // halo + fill for readability
+  ctx.font = "12px ui-monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = "rgba(7,16,24,0.9)"; // dark halo
+  ctx.strokeText(text, tx, ty);
+  ctx.fillStyle = "#cfe8f7";
+  ctx.fillText(text, tx, ty);
+
+  ctx.restore();
 }
+
 
 function drawActiveMeasure(){
   if(!state.measure) return;
@@ -1379,9 +1533,30 @@ canvas.addEventListener('contextmenu', e=>{
     el.className='aircraftCard selected';
     const route = a.navMode==="DIRECT"&&a.directWptId ? ` • DIR ${env.getWaypoint(a.directWptId)?.name||""}` : "";
     el.innerHTML = `
-      <div><strong>${a.cs}</strong> — HDG ${formatHeading(a.hdg)} • SPD ${a.spd_kt|0} kt • ${formatAltitude(a.alt_ft)} • M ${a.mach.toFixed(2)}${route}</div>
-      <div class="small">Targets: HDG ${formatHeading(a.tgtHdg)} • ${a.tgtSpeedMode==='MACH' ? ('M '+(a.tgtMach?.toFixed(2) ?? (a.tgtSpd_kt/isaSpeedOfSoundKts(a.alt_ft)).toFixed(2))) : (a.tgtSpd_kt|0)+' kt'} • ALT ${formatAltitude(a.tgtAlt)} • VS ${a.vs_fpm|0} • SEC ${a.inSector?'IN':'OUT'}</div>
-    `;
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+    <div><strong>${a.cs}</strong> — HDG ${formatHeading(a.hdg)} • SPD ${a.spd_kt|0} kt • ${formatAltitude(a.alt_ft)} • M ${a.mach.toFixed(2)}${route}</div>
+    <button class="btnSfp small" style="white-space:nowrap;">SFP</button>
+  </div>
+  <div class="small">Targets: HDG ${formatHeading(a.tgtHdg)} • ${
+    a.tgtSpeedMode==='MACH'
+      ? ('M '+(a.tgtMach?.toFixed(2) ?? (a.tgtSpd_kt/isaSpeedOfSoundKts(a.alt_ft)).toFixed(2)))
+      : (a.tgtSpd_kt|0)+' kt'
+  } • ALT ${formatAltitude(a.tgtAlt)} • VS ${a.vs_fpm|0} • SEC ${a.inSector?'IN':'OUT'}</div>
+`;
+const sfpBtn = el.querySelector('.btnSfp');
+if(sfpBtn){
+  sfpBtn.addEventListener('click', ()=>{
+    openSFP(a);
+  });
+  // If SFP window is open, refresh it for the new selection (or close if none)
+const openWin = document.querySelector('.sfpWin');
+if(openWin){
+  const sel = getSelected();
+  if(sel) renderSFP(sel); else closeSFP();
+}
+
+}
+
     altInput.value = useFL.checked ? Math.round(a.tgtAlt/100) : Math.round(a.tgtAlt);
     document.getElementById('hdg').value = Math.round(a.tgtHdg)||0;
     document.getElementById('spd').value = a.tgtSpeedMode==='KT' ? a.tgtSpd_kt|0 : "";
