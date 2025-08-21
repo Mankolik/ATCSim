@@ -3,14 +3,27 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>ATC Radar Trainer — v5.0</title>
+<title>ATC Radar Trainer — v5.1</title>
 <style>
   :root{
-    --bg:#0a0f14; --grid:#0f1b24; --ring:#123041; --text:#e6f0f7; --accent:#6ad1ff;
-    --panel:#0e1820; --tag:#0d2230; --tagBorder:#1b3a4f; --sel:#9bf6a9;
-    --warn:#ffcc66; --alert:#ff6a6a; --muted:#9fb3c1; --magenta:#ff7bff;
-    --leader:#89b8ff; --rect:#66b1ff;
-  }
+  /* Near-black scope */
+  --bg:#060707;
+  --grid:#0c0c0c;         /* very faint grid (optional) */
+  --ring:#141414;         /* very faint rings (optional) */
+
+  /* UI text + panel remain readable */
+  --text:#e8eef2;
+  --accent:#8fd3ff;
+  --panel:#0d1115;
+
+  /* not used for labels anymore, but keep */
+  --tag:#0d2230; --tagBorder:#1b3a4f;
+  --sel:#9bf6a9; --warn:#ffcc66; --alert:#ff6a6a;
+  --muted:#9fb3c1; --magenta:#ff7bff;
+
+  /* leader/rect colors no longer blue; vectors & leaders will be white in JS */
+  --leader:#ffffff; --rect:#3a3a3a;
+}
   *{box-sizing:border-box}
   html,body{height:100%}
   body{
@@ -40,21 +53,40 @@
   .grid2{display:grid; grid-template-columns:1fr 1fr; gap:8px}
   .kbd{padding:2px 6px; border:1px solid #274b64; border-radius:6px; background:#0c1b25}
 
-  /* ===== Track labels (semi-transparent) ===== */
-  .tag{
-    position:absolute; background:var(--tag); border:1px solid var(--tagBorder);
-    padding:6px 8px; border-radius:8px; filter:drop-shadow(0 2px 0 rgba(0,0,0,.35));
-    touch-action:none; user-select:none; cursor:grab;
-    opacity:.75;            /* NEW: semi-transparent labels */
-    transition:opacity .12s; /* feel nicer when hovered/dragged */
-  }
+/* ===== Track labels (text only; no box) ===== */
+.tag{
+  position:absolute;
+  background:transparent;        /* no box */
+  border:none;                   /* no border */
+  padding:0;                     /* tight */
+  filter:none;
+  touch-action:none; user-select:none; cursor:grab;
+  opacity:1;                     /* solid text */
+}
+.tag:hover,.tag.dragging{opacity:1}
+
+/* simple type ramp */
+.tag .l1{ font-weight:700; font-size:14px; line-height:1.05 }
+.tag .l2{ font-size:12px; line-height:1.05; letter-spacing:.2px }
+
+/* state-driven colors */
+.tag.st-controlled { color:#69ff8a; }     /* green */
+.tag.st-inbound    { color:#ffffff; }     /* white */
+.tag.st-intruder   { color:#ffd9b3; }     /* very light orange */
+.tag.st-outbound   { color:#9aa3aa; }     /* greyed out */
+
+/* tiny inline button to mark handoff (optional) */
+.tag .ho{
+  display:inline-block; margin-left:8px; padding:1px 6px;
+  font-size:10px; border:1px solid currentColor; border-radius:999px;
+}
   .tag:hover,.tag.dragging{opacity:1}
   .tag .line1{font-weight:600}
   .tag .line2{font-size:12px; color:var(--muted)}
   .tag.alert{border-color:var(--alert)}
   .tag.warn{border-color:var(--warn)}
   .pill{padding:2px 6px; border:1px solid #2c4a5f; border-radius:999px; background:#0c1b25; font-size:11px; color:var(--muted)}
-  .waypointLabel{position:absolute; background:#0b1620; border:1px solid #2c4a5f; border-radius:6px; padding:2px 6px; font-size:12px; color:#cde; opacity:.85}
+  .waypointLabel{position:absolute; background:transparent; border:0px solid #2c4a5f; border-radius:6px; padding:0px 6px; font-size:11px; color:#cde; opacity:.85}
   /* --- SFP floating window --- */
 .sfpWin{
   position:absolute; right:12px; top:64px; width:260px;
@@ -81,7 +113,7 @@
 </head>
 <body>
 <header>
-  <h1>ATC Radar Trainer — v5.0</h1>
+  <h1>ATC Radar Trainer — v5.1</h1>
   <div class="controls">
     <button id="spawn">Spawn traffic</button>
     <label class="small">
@@ -271,6 +303,26 @@ Esc = delete last ruler</div>
   function bearingFromTo(x1,y1,x2,y2){
     return mod360(toDeg(Math.atan2(x2-x1, -(y2-y1))));
   }
+  function nextWptName(a, env){
+  if(a.navMode==="DIRECT" && a.directWptId) return env.getWaypoint(a.directWptId)?.name || "—";
+  if(a.navMode==="ROUTE" && a.routeIdx < a.route.length) return env.getWaypoint(a.route[a.routeIdx])?.name || "—";
+  return "—";
+}
+function fmtFLshort(ft){ return 'FL' + String(Math.round(ft/100)).padStart(3,'0'); }
+function fmtCFL(ft){ return 'CFL' + String(Math.round(ft/100)).padStart(3,'0'); }
+function fmtVS100(vs_fpm){
+  const h = Math.round(vs_fpm/100);
+  if (h===0) return "0";
+  return (h>0?"+":"−") + Math.abs(h);
+}
+function getTrackState(a){
+  if (a.inSector){
+    return a.hoMarked ? "intruder" : "controlled";
+  } else {
+    return a.everInRect ? "outbound" : "inbound";
+  }
+}
+
   // --- Short Flight Plan (SFP) & helpers ---
 const DEP_PORTS = ["EPWA","EPKT","EPPO"];   // tweak later
 const ARR_PORTS = ["EDDF","EPWR","EPLL"];   // tweak later
@@ -388,7 +440,11 @@ this.spawnSec = (typeof simNowSec !== 'undefined') ? simNowSec : 0;
 
 
       // Rect sector state
-      this.inSector = true; this.handoffPending=false; this.pendingState=null;
+      this.inSector = true; this.handoffPending=false; this.pendingState=null; 
+      // coloring / state bookkeeping
+this.everInRect = env.inRect(this.x_nm, this.y_nm); // ever been inside?
+this.hoMarked   = false;                             // we marked H/O manually
+
     }
     setHeading(h){ this.navMode=null; this.directWptId=null; this.tgtHdg=mod360(h); }
     setAltitude(alt_ft,vs=null){ this.tgtAlt=Math.max(0,Math.round(alt_ft));
@@ -461,6 +517,8 @@ this.spawnSec = (typeof simNowSec !== 'undefined') ? simNowSec : 0;
 
       // Sector (rectangle)
 const inside = env.inRect(this.x_nm, this.y_nm);
+if (inside) this.everInRect = true;
+
 if (inside !== this.inSector) {
   const leftSector = this.inSector && !inside; // just crossed OUT
   if (env.autoHandoff) {
@@ -1113,18 +1171,36 @@ function spawnConflictPack(useRoutes=false){
       // Update classes/content/position
       tag.classList.toggle('alert', state.conflictsNow.some(([p,q])=>p===a.id||q===a.id));
       tag.classList.toggle('warn', !tag.classList.contains('alert') && state.conflictsPred.some(([p,q])=>p===a.id||q===a.id));
-      if(a.id===state.selectedId) tag.style.borderColor="#367a4d"; else tag.style.borderColor="";
-      const ho = a.handoffPending ? ` <span class="pill">H/O ${a.pendingState?'IN':'OUT'}</span>` : "";
-      const sec = a.inSector ? "IN" : "OUT";
-      const rte = (a.navMode==="ROUTE" && a.route.length)
-  ? ` • RTE ${Math.min(a.routeIdx+1,a.route.length)}/${a.route.length}`
-  : "";
+      // apply state color class for text-only labels
+const st = getTrackState(a);   // uses helpers from step 2.3
+tag.classList.remove('st-controlled','st-inbound','st-intruder','st-outbound');
+tag.classList.add('st-'+st);
+
+// build 4 text lines (no box, no table)
+const curFL = fmtFLshort(a.alt_ft);
+const cfl   = fmtCFL(a.tgtAlt);
+const type  = a.fp?.type || "—";
+const wpt   = nextWptName(a, env);
+const vs100 = fmtVS100(a.vs_fpm);
+
 tag.innerHTML = `
-  <div class="line1">${a.cs} <span class="pill">SEC:${sec}</span>${ho}</div>
-  <div class="line2">HDG ${formatHeading(a.hdg)} • ${a.spd_kt|0}kt • ${
-    a.alt_ft>=18000 ? ('FL'+String(Math.round(a.alt_ft/100)).padStart(3,'0')) : ((a.alt_ft|0)+' ft')
-  } • M ${a.mach.toFixed(2)} • VS ${a.vs_fpm|0}${rte}</div>
+  <div class="l1">${a.cs}<span class="ho" data-ho="1" title="Toggle H/O">H/O</span></div>
+  <div class="l2">${curFL}    ${cfl}</div>
+  <div class="l2">${type}    ${wpt}</div>
+  <div class="l2">H${formatHeading(a.hdg)}    S${a.spd_kt|0}/M${a.mach.toFixed(2)}    VS${vs100}</div>
+
 `;
+
+// wire the tiny H/O toggle (marks a.hoMarked to drive "intruder" color)
+const hoBtn = tag.querySelector('[data-ho]');
+if (hoBtn){
+  hoBtn.onclick = (ev)=>{
+    ev.stopPropagation();
+    a.hoMarked = !a.hoMarked;
+    layoutTags(); drawCanvasOnly();
+  };
+}
+
 
       tag.style.left=(x+a.labelDx)+'px'; tag.style.top=(y+a.labelDy)+'px';
     }
@@ -1137,46 +1213,68 @@ tag.innerHTML = `
   }
 
   function drawScope(){
-    ctx.fillStyle="#071018"; ctx.fillRect(0,0,W,H);
-    // Grid
-    ctx.strokeStyle="#0f1b24"; ctx.lineWidth=1; ctx.beginPath();
-    for(let x=0;x<W;x+=40){ ctx.moveTo(x,0); ctx.lineTo(x,H); }
-    for(let y=0;y<H;y+=40){ ctx.moveTo(0,y); ctx.lineTo(W,y); }
-    ctx.stroke();
-    // Range rings
-    ctx.strokeStyle="#123041"; ctx.lineWidth=1.2;
-    const rings=5;
-    for(let i=1;i<=rings;i++){
-      const r=(Math.min(W,H)/2)*i/rings; ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
-      ctx.fillStyle="#6aa1c4"; ctx.font="12px ui-monospace"; const nm=Math.round(rangeNM*i/rings);
-      ctx.fillText(nm+" NM", cx+4+r*Math.cos(-Math.PI/4), cy+4+r*Math.sin(-Math.PI/4));
-    }
-    // Crosshair
-    ctx.strokeStyle="#1b3a4f"; ctx.beginPath(); ctx.moveTo(cx,0); ctx.lineTo(cx,H); ctx.moveTo(0,cy); ctx.lineTo(W,cy); ctx.stroke();
+  // Background (near-black)
+  ctx.save();
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "#060707";
+  ctx.fillRect(0,0,W,H);
 
-    // Rectangular sector
-    const halfW=nmToPx(env.rectW/2), halfH=nmToPx(env.rectH/2);
-    ctx.strokeStyle= "#66b1ff"; ctx.lineWidth=1.6; ctx.setLineDash([6,6]);
-    ctx.strokeRect(cx-halfW, cy-halfH, halfW*2, halfH*2);
-    ctx.setLineDash([]);
+  // Very faint grid (optional)
+  ctx.strokeStyle = "#0b0b0b";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for(let x=0;x<W;x+=40){ ctx.moveTo(x,0); ctx.lineTo(x,H); }
+  for(let y=0;y<H;y+=40){ ctx.moveTo(0,y); ctx.lineTo(W,y); }
+  ctx.stroke();
+
+  // Faint range rings (no labels)
+  ctx.strokeStyle = "#141414";
+  ctx.lineWidth = 1;
+  const ringCount = 5;
+  for(let i=1;i<=ringCount;i++){
+    const r = (Math.min(W,H)/2) * i / ringCount;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI*2);
+    ctx.stroke();
   }
+
+  // Crosshair
+  ctx.strokeStyle = "#1a1a1a";
+  ctx.beginPath();
+  ctx.moveTo(cx,0); ctx.lineTo(cx,H);
+  ctx.moveTo(0,cy); ctx.lineTo(W,cy);
+  ctx.stroke();
+
+  // Rectangular sector (subtle grey)
+  const halfWpx = nmToPx(env.rectW/2);
+  const halfHpx = nmToPx(env.rectH/2);
+  ctx.strokeStyle = "#3a3a3a";
+  ctx.lineWidth = 1.6;
+  ctx.setLineDash([6,6]);
+  ctx.strokeRect(cx-halfWpx, cy-halfHpx, halfWpx*2, halfHpx*2);
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 
   function formatAltitude(ft){ return ft>=18000?("FL"+String(Math.round(ft/100)).padStart(3,'0')):((ft|0)+" ft"); }
   function inFilter(ft){ return ft>=state.filterMin && ft<=state.filterMax; }
 
-  function drawPredictLines(ac, selected){
-    const wants=[ state.pred1?60:0, state.pred3?180:0, state.pred5?300:0 ].filter(Boolean);
-    if(!wants.length) return;
-    const x0=cx+nmToPx(ac.x_nm), y0=cy+nmToPx(ac.y_nm);
-    ctx.lineWidth=1.6; ctx.setLineDash([]); // SOLID
-    ctx.strokeStyle = selected? "#9ad6ff" : "#5ea8d6";
-    for(const t of wants){
-      const dist_nm=ac.spd_kt*nmPerKtPerSec*t;
-      const x=x0+nmToPx(Math.sin(toRad(ac.hdg))*dist_nm);
-      const y=y0+nmToPx(-Math.cos(toRad(ac.hdg))*dist_nm);
-      ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x,y); ctx.stroke();
-    }
+  function drawPredictLines(ac){
+  const wants=[ state.pred1?60:0, state.pred3?180:0, state.pred5?300:0 ].filter(Boolean);
+  if(!wants.length) return;
+  const x0=cx+nmToPx(ac.x_nm), y0=cy+nmToPx(ac.y_nm);
+  ctx.lineWidth=1.5; ctx.setLineDash([]);      // solid
+  ctx.strokeStyle = "#ffffff";                  // white
+  for(const t of wants){
+    const dist_nm=ac.spd_kt*nmPerKtPerSec*t;
+    const x=x0+nmToPx(Math.sin(toRad(ac.hdg))*dist_nm);
+    const y=y0+nmToPx(-Math.cos(toRad(ac.hdg))*dist_nm);
+    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x,y); ctx.stroke();
   }
+}
+
   
 function drawAirways(){
   ctx.save();
@@ -1337,7 +1435,7 @@ function handleMeasureSmartClick(xPx, yPx){
       const dim = !inFilter(a.alt_ft); ctx.globalAlpha = dim?0.35:1.0;
 
       // Dotted trail (dots only)
-      ctx.fillStyle = selected? "#9bf6a9" : "#436b86";
+      ctx.fillStyle = "#ffffff";
       for(const p of a.trail){
         const tx = cx+nmToPx(p.x), ty = cy+nmToPx(p.y);
         ctx.beginPath(); ctx.arc(tx,ty,2.4,0,Math.PI*2); ctx.fill();
@@ -1347,9 +1445,21 @@ function handleMeasureSmartClick(xPx, yPx){
       const showPred = state.predFor==="all" || (state.predFor==="sel" && selected);
       if(showPred) drawPredictLines(a, selected);
 
-      // Aircraft dot
-      const x=cx+nmToPx(a.x_nm), y=cy+nmToPx(a.y_nm);
-      ctx.fillStyle=selected? "#9bf6a9" : "#e6f0f7"; ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2); ctx.fill();
+      // Aircraft symbol: diamond (45° rotated square)
+const x = cx + nmToPx(a.x_nm), y = cy + nmToPx(a.y_nm);
+const s = 5; // half-size in px; tweak 4–6 to taste
+ctx.fillStyle = "#ffffff";
+ctx.beginPath();
+ctx.moveTo(x, y - s);   // top
+ctx.lineTo(x + s, y);   // right
+ctx.lineTo(x, y + s);   // bottom
+ctx.lineTo(x - s, y);   // left
+ctx.closePath();
+ctx.fill();
+// (optional outline)
+// ctx.lineWidth = 1; ctx.strokeStyle = "#ffffff"; ctx.stroke();
+
+
     }
 
     drawConflicts();
@@ -1364,7 +1474,8 @@ function handleMeasureSmartClick(xPx, yPx){
       const left = rect.left - wrapRect.left, top = rect.top - wrapRect.top;
       const right = left + rect.width, bottom = top + rect.height;
       const ex = clamp(dotX, left, right), ey = clamp(dotY, top, bottom);
-      ctx.strokeStyle = "rgba(137,184,255,0.9)"; ctx.lineWidth=1.2; ctx.setLineDash([]);
+      ctx.strokeStyle = "#ffffff";
+
       ctx.beginPath(); ctx.moveTo(dotX, dotY); ctx.lineTo(ex, ey); ctx.stroke();
     }
   }
@@ -1534,14 +1645,15 @@ canvas.addEventListener('contextmenu', e=>{
     const route = a.navMode==="DIRECT"&&a.directWptId ? ` • DIR ${env.getWaypoint(a.directWptId)?.name||""}` : "";
     el.innerHTML = `
   <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-    <div><strong>${a.cs}</strong> — HDG ${formatHeading(a.hdg)} • SPD ${a.spd_kt|0} kt • ${formatAltitude(a.alt_ft)} • M ${a.mach.toFixed(2)}${route}</div>
+    <div><strong>${a.cs}</strong> — H${formatHeading(a.hdg)} • S${a.spd_kt|0} kt/M${a.mach.toFixed(2)} • ${formatAltitude(a.alt_ft)}${route}</div>
     <button class="btnSfp small" style="white-space:nowrap;">SFP</button>
   </div>
-  <div class="small">Targets: HDG ${formatHeading(a.tgtHdg)} • ${
-    a.tgtSpeedMode==='MACH'
-      ? ('M '+(a.tgtMach?.toFixed(2) ?? (a.tgtSpd_kt/isaSpeedOfSoundKts(a.alt_ft)).toFixed(2)))
-      : (a.tgtSpd_kt|0)+' kt'
-  } • ALT ${formatAltitude(a.tgtAlt)} • VS ${a.vs_fpm|0} • SEC ${a.inSector?'IN':'OUT'}</div>
+  <div class="small">Targets: H${formatHeading(a.tgtHdg)} • ${
+  a.tgtSpeedMode==='MACH'
+    ? ('M'+(a.tgtMach?.toFixed(2) ?? (a.tgtSpd_kt/isaSpeedOfSoundKts(a.alt_ft)).toFixed(2)))
+    : ('S'+((a.tgtSpd_kt|0))+' kt')
+} • ALT ${formatAltitude(a.tgtAlt)} • VS${fmtVS100(a.vs_fpm)} • SEC ${a.inSector?'IN':'OUT'}
+
 `;
 const sfpBtn = el.querySelector('.btnSfp');
 if(sfpBtn){
