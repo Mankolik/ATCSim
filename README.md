@@ -6,7 +6,7 @@ A lightweight browser-based radar/ATC trainer. No build step, just open.
 
 ## Features
 - Semi-transparent movable track labels
-- Shift+MMB measure tool; **RMB drops/commits** the ruler; **Esc** removes last
+- Shift+MMB measure tool; **Esc** removes last
 - Predict vectors (1/3/5 min), conflict alerts (now + lookahead)
 - Waypoints + Direct-to, speed/Mach, altitude (FL mode), 250kt rule
 - Rectangular sector & handoff logic
