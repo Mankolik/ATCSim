@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>ATC Radar Trainer — v6.2.1</title>
+<title>ATC Radar Trainer — v7</title>
 <style>
   :root{
   /* Near-black scope */
@@ -130,7 +130,7 @@ body.label-lg .tag .l2{ font-size:14px }
 </head>
 <body>
 <header>
-  <h1>ATC Radar Trainer — v6.2.1</h1>
+  <h1>ATC Radar Trainer — v7</h1>
   <div class="controls">
     <button id="spawn">Spawn traffic</button>
     <label class="small">
@@ -141,7 +141,21 @@ body.label-lg .tag .l2{ font-size:14px }
     <button id="clear">Clear all</button>
     <button id="pause">Pause</button>
     <label class="small">Range (NM)
-      <select id="rangeSel"><option>20</option><option >40</option><option>60</option><option selected>80</option><option>120</option></select>
+      <select id="rangeSel">
+  <option>20</option>
+  <option>40</option>
+  <option>60</option>
+  <option>80</option>
+  <option selected>120</option>
+  <option>160</option>
+  <option>200</option>
+  <option>240</option>
+  <option>320</option>
+  <option>400</option>
+  <option>600</option>
+  <option>800</option>
+</select>
+
     </label>
     <label class="small">Sim speed
       <select id="simSpeed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
@@ -332,15 +346,7 @@ const FIX_PASS_TREND_NM = 2.0; // or, if we've been closer than this and range s
   function bearingFromTo(x1,y1,x2,y2){
     return mod360(toDeg(Math.atan2(x2-x1, -(y2-y1))));
   }
-  // === closest static waypoint to a raw x_nm / y_nm ===
-function nearestStaticFixId(x_nm, y_nm){
-  let bestId = null, bestD = Infinity;
-  for(const w of WP_ALL){
-    const d = Math.hypot(w.x_nm - x_nm, w.y_nm - y_nm);
-    if(d < bestD){ bestD = d; bestId = w.id; }
-  }
-  return bestId;
-}
+
 // signed angle (deg) between two vectors originating at the *same* point
 function turnAngleDeg(ax, ay, bx, by){
   const dot  = ax*bx + ay*by;
@@ -385,55 +391,7 @@ const rand = (a,b)=> a + Math.random()*(b-a);
 const randi = (a,b)=> Math.floor(rand(a,b+1));
 const pick = arr => arr[Math.floor(Math.random()*arr.length)];
 
-function makeSFP({dep=null, dest=null, cruiseFL=360, tasKt=450, type=null}={}){
-  return {
-    dep:  dep  ?? pick(DEP_PORTS),
-    dest: dest ?? pick(ARR_PORTS),
-    cruiseFL, tasKt, type: type ?? pick(TYPES)
-  };
-}
-// Pick a dynamic waypoint that sits closest to the great-circle* line
-// between two static fixes (entry → exit).  If no dynamic WPTs exist
-// fall back to a random inner dynamic fix (or null if none).
-// Return a dynamic fix that sits *near* the line Entry–Exit and
-// produces a turn ≤ maxTurnDeg at that fix.  If none fits, return null.
-function pickGentleMidFix(entryId, exitId, maxOffNm = 100, maxTurnDeg = 115){
-  if (!wpts.length) return null;
-  const A = getWPById(entryId), B = getWPById(exitId);
-  if (!A || !B) return null;
 
-  const dxAB = B.x_nm - A.x_nm, dyAB = B.y_nm - A.y_nm;
-  const len2 = dxAB*dxAB + dyAB*dyAB;
-  if (len2 < 1e-6) return null;
-
-  let best = null, bestScore = Infinity;
-
-  // allow a little beyond the segment so near-corner fixes still count
-  const tMin = -0.12, tMax = 1.12;
-
-  for (const w of wpts){
-    const t = ((w.x_nm - A.x_nm)*dxAB + (w.y_nm - A.y_nm)*dyAB) / len2;
-    if (t < tMin || t > tMax) continue;
-
-    const px = A.x_nm + t*dxAB, py = A.y_nm + t*dyAB;
-    const off = Math.hypot(px - w.x_nm, py - w.y_nm);
-    if (off > maxOffNm) continue;
-
-    const inX =  w.x_nm - A.x_nm, inY =  w.y_nm - A.y_nm;
-    const outX = B.x_nm - w.x_nm, outY = B.y_nm - w.y_nm;
-    const turn = turnAngleDeg(inX, inY, outX, outY);
-    if (!Number.isFinite(turn) || turn > maxTurnDeg) continue;
-
-    // slight bias toward central fixes so we don't hug the rim too much
-    const center = Math.hypot(w.x_nm, w.y_nm);
-
-    // you had: turn*1.0 + off*0.15 — keep that vibe but make it a bit more generous
-    const score = turn*1.0 + off*0.2 + center*0.04;
-
-    if (score < bestScore){ bestScore = score; best = w.id; }
-  }
-  return best;
-}
 
 function forceMidBetween(entryId, exitId){
   // Try the gentle picker first
@@ -456,86 +414,8 @@ function forceMidBetween(entryId, exitId){
       if (best != null) return best;
     }
   }
-  // Return up to `want` mids that keep every leg ≤ maxTurn / maxOff
-function pickMidFixes(entryId, exitId, want = 2,
-                       maxOffNm = GENTLE.maxOffNm,
-                       maxTurnDeg = GENTLE.maxTurnDeg)
-{
-  if (!wpts.length || want < 1) return [];
-
-  const A = getWPById(entryId), B = getWPById(exitId);
-  if (!A || !B) return [];
-
-  // Score every dynamic fix just like before
-  const cand = [];
-  for (const w of wpts){
-    // project W onto AB
-    const dxAB = B.x_nm - A.x_nm, dyAB = B.y_nm - A.y_nm;
-    const len2 = dxAB*dxAB + dyAB*dyAB;
-    const t = ((w.x_nm-A.x_nm)*dxAB + (w.y_nm-A.y_nm)*dyAB)/len2;
-    if (t < -0.12 || t > 1.12) continue;
-
-    const px = A.x_nm + t*dxAB, py = A.y_nm + t*dyAB;
-    const off = Math.hypot(w.x_nm-px, w.y_nm-py);
-    if (off > maxOffNm) continue;
-
-    // turn angle if this becomes the only mid
-    const inX = w.x_nm-A.x_nm,  inY = w.y_nm-A.y_nm;
-    const outX= B.x_nm-w.x_nm, outY = B.y_nm-w.y_nm;
-    const ang = turnAngleDeg(inX,inY,outX,outY);
-    if (ang > maxTurnDeg) continue;
-
-    const center = Math.hypot(w.x_nm, w.y_nm);
-    const score  = ang*1.0 + off*0.2 + center*0.04;
-    cand.push({ id:w.id, score, t });
-  }
-  cand.sort((p,q)=>p.score-q.score);
-
-  // Take up to `want` mids, spread roughly along the route
-  const mids = [];
-  for (const c of cand){
-    if (mids.length >= want) break;
-    // keep some spacing: ±0.2 of route length
-    if (mids.some(m => Math.abs(m.t - c.t) < 0.12)) continue;
-    mids.push(c);
-  }
-  return mids.map(m=>m.id);
-}
 
   
-  function nearestRingTo(x_nm, y_nm){
-  let bestId = null, bestD = Infinity;
-  for (const fid of STATIC_RING_FIXES){
-    const w = getWPById(fid);
-    const d = Math.hypot(w.x_nm - x_nm, w.y_nm - y_nm);
-    if (d < bestD){ bestD = d; bestId = fid; }
-  }
-  return bestId;
-}
-
-// Build with the *final* entry chosen from spawn coords
-function buildTransitRouteFromSpawn(spawnX, spawnY, fp){
-  const entry = randomEdge(null);
-  const exit  = randomEdge(entry);
-  const mids  = pickMidFixes(entry, exit, 2);   // ← new
-  const legs  = [entry, ...mids, exit];         // ← new
-  return enforceRingEnds(legs);
-}
-
-function buildArrivalRouteFromSpawn(spawnX, spawnY, fp){
-  const entry = nearestRingTo(spawnX, spawnY);
-  const mid   = forceMidBetween(entry, WP.CTR.id);
-  const legs  = mid ? [entry, mid, WP.CTR.id] : [entry, WP.CTR.id];
-  return enforceRingEnds(legs);
-}
-
-// Departure starts at CTR, exit is opposite-ish; spawnX/Y don’t matter here
-function buildDepartureRoute(fp){
-  const exit = randomEdge(null);
-  const mid  = forceMidBetween(WP.CTR.id, exit);
-  const legs = mid ? [WP.CTR.id, mid, exit] : [WP.CTR.id, exit];
-  return enforceRingEnds(legs);
-}
 
 
   // Fallback 2: nearest-to-center dynamic waypoint
@@ -547,76 +427,6 @@ function buildDepartureRoute(fp){
   }
   return null;
 }
-
-
-const GENTLE = { maxOffNm: 100, maxTurnDeg: 115 };  // was 25/45
-
-function sanitizeMidpoints(route, limits = GENTLE){
-  if (!Array.isArray(route) || route.length < 3) return route;
-  const { maxOffNm, maxTurnDeg } = limits;
-
-  const out = [route[0]];
-  for (let i = 1; i < route.length - 1; i++){
-    const prevId = out[out.length - 1];
-    const curId  = route[i];
-    const nextId = route[i+1];
-
-    const prev = getWPById(prevId), cur = getWPById(curId), next = getWPById(nextId);
-    if (!prev || !cur || !next) continue;
-
-    // ignore interior ring fixes entirely (we strip them anyway)
-    if (isRing(curId)) continue;
-
-    // turn at 'cur'
-    const inX  = cur.x_nm - prev.x_nm, inY  = cur.y_nm - prev.y_nm;
-    const outX = next.x_nm - cur.x_nm, outY = next.y_nm - cur.y_nm;
-    const turn = turnAngleDeg(inX, inY, outX, outY);
-
-    // perpendicular offset from Prev–Next line
-    const dx = next.x_nm - prev.x_nm, dy = next.y_nm - prev.y_nm;
-    const len2 = dx*dx + dy*dy;
-    let off = Infinity;
-    if (len2 > 1e-6){
-      const t  = ((cur.x_nm - prev.x_nm)*dx + (cur.y_nm - prev.y_nm)*dy) / len2;
-      const px = prev.x_nm + t*dx, py = prev.y_nm + t*dy;
-      off = Math.hypot(cur.x_nm - px, cur.y_nm - py);
-    }
-
-    if (Number.isFinite(turn) && Number.isFinite(off) &&
-        turn <= maxTurnDeg && off <= maxOffNm){
-      out.push(curId);
-    } // else: drop this mid, it's too sharp or too far off-line
-  }
-  out.push(route[route.length-1]);
-  return out;
-}
-
-
-function buildTransitRoute(fp){
-  const entry = randomEdge(null);
-  const exit  = randomEdge(entry);
-  const mid   = forceMidBetween(entry, exit);
-  const legs  = mid ? [entry, mid, exit] : [entry, exit];
-  return enforceRingEnds(legs);
-}
-
-function buildArrivalRoute(fp){
-  const entry = randomEdge(null);
-  const mid   = forceMidBetween(entry, WP.CTR.id);
-  const legs  = mid ? [entry, mid, WP.CTR.id] : [entry, WP.CTR.id];
-  return enforceRingEnds(legs);
-}
-
-function buildDepartureRoute(fp){
-  const exit = randomEdge(null);
-  const mid  = forceMidBetween(WP.CTR.id, exit);
-  const legs = mid ? [WP.CTR.id, mid, exit] : [WP.CTR.id, exit];
-  return enforceRingEnds(legs);
-}
-
-
-
-
 
 
  function findNearestAcPx(xPx, yPx, tolPx=16){
@@ -858,12 +668,18 @@ if (inside !== this.inSector) {
 const canvas=document.getElementById('radar'); const ctx=canvas.getContext('2d');
 const wrap=document.getElementById('radarWrap');
 let W=0,H=0,cx=0,cy=0;
+// Center shift in **pixels** ( +x = push content right, -y = push content up )
+const CENTER_SHIFT = { x: -90, y: 60 };  // tweak to taste
+
 let booted = false;
 
 function resize(){
   const r=wrap.getBoundingClientRect();
   canvas.width=r.width; canvas.height=r.height;
-  W=canvas.width; H=canvas.height; cx=W/2; cy=H/2;
+  W=canvas.width; H=canvas.height;
+cx = W/2 + CENTER_SHIFT.x;
+cy = H/2 + CENTER_SHIFT.y;
+
   if (booted) drawAll(); // only redraw after full boot
 }
 window.addEventListener('resize', resize);
@@ -885,14 +701,71 @@ function acInScopeNm(a, marginNm=0){
   return Math.hypot(a.x_nm, a.y_nm) <= (rangeNM + marginNm);
 }
 
+// ===== NEW sector polygon (nm, centered at 0,0) =====
+const SECTOR_POLY = [
+  [-75.42, -26.46],
+  [30.31, -38.83],
+  [29.17, -96.40],
+  [108.72, -81.29],
+  [128.23, -60.85],
+  [125.98, -24.29],
+  [84.27, -2.74],
+  [46.48, 41.59],
+  [46.07, 64.62],
+  [41.86, 66.49],
+  [39.82, 67.02],
+  [26.74, 57.32],
+  [33.13, 53.43],
+  [31.66, 50.17],
+  [19.74, 51.18],
+  [-1.33, 40.22],
+  [5.12, 49.33],
+  [-7.41, 60.37],
+  [-27.20, 39.93],
+  [-17.12, 30.91],
+  [-25.49, 25.85],
+  [-33.91, 29.46],
+  [-41.71, 20.33],
+  [-58.07, 16.85],
+  [-60.59, 7.22],
+  [-68.56, 4.46],
+  [-71.54, 3.90],
+  [-72.00, 12.43],
+  [-78.09, 11.85],
+  [-69.54, -12.75],
+  [-71.55, -16.96],
+  [-72.05, -24.28],
+];
+
+// point-in-polygon (ray casting)
+function pointInPoly(x, y, poly){
+  let inside = false;
+  for (let i=0, j=poly.length-1; i<poly.length; j=i++){
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    const intersect = ((yi>y)!=(yj>y)) && (x < (xj-xi)*(y-yi)/(yj-yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+// bounding box (for legacy rect-based spawn math)
+const SECTOR_BBOX = (() => {
+  const xs = SECTOR_POLY.map(p=>p[0]), ys = SECTOR_POLY.map(p=>p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  return {minX,maxX,minY,maxY, width:maxX-minX, height:maxY-minY};
+})();
 
 
   const env = {
-    restrict250:true, autoHandoff:true,
-    rectW:160, rectH:120,
-    getWaypoint: id => getWPById(id),
-    inRect: (x_nm,y_nm)=>Math.abs(x_nm)<=env.rectW/2 && Math.abs(y_nm)<=env.rectH/2
-  };
+  restrict250:true, autoHandoff:true,
+  // keep rectW/H for legacy UI/spawn but derive from polygon bbox
+  rectW: SECTOR_BBOX.width,
+  rectH: SECTOR_BBOX.height,
+  getWaypoint: id => getWPById(id),
+  inRect: (x_nm, y_nm) => pointInPoly(x_nm, y_nm, SECTOR_POLY)
+};
+
 
   const state = {
     ac:[], selectedId:null, paused:false,
@@ -1179,37 +1052,109 @@ function buildAirways(k=2){
 
 
   
-  // === Named waypoints & airways (static catalog) ===
-const WP = {
-  CTR: { id: 1000, name: "CTR", x_nm:  0,  y_nm:   0 },
-  ENE: { id: 1001, name: "ENE", x_nm: 65,  y_nm: -60 },
-  ESE: { id: 1002, name: "ESE", x_nm: 65,  y_nm:  60 },
-  WNW: { id: 1003, name: "WNW", x_nm:-65,  y_nm: -60 },
-  WSW: { id: 1004, name: "WSW", x_nm:-65,  y_nm:  60 },
-  N01: { id: 1005, name: "N01", x_nm:  0,  y_nm: -80 },
-  S01: { id: 1006, name: "S01", x_nm:  0,  y_nm:  80 },
-  E01: { id: 1007, name: "E01", x_nm: 80,  y_nm:   0 }, // NEW
-  W01: { id: 1008, name: "W01", x_nm:-80,  y_nm:   0 }  // NEW
-};
+  // ==== REPLACED: static waypoints (only new list; no CTR) ====
+const WP = {};
+Object.assign(WP, {
+  NAROX: { id:3000, name:"NAROX", x_nm:-71.06, y_nm:-8.69 },
+  LASIS: { id:3001, name:"LASIS", x_nm:-71.80, y_nm:-20.75 },
+  DIMEX: { id:3002, name:"DIMEX", x_nm:-27.71, y_nm:-32.13 },
+  XIDNA: { id:3003, name:"XIDNA", x_nm:5.23, y_nm:-36.00 },
+  BESTO: { id:3004, name:"BESTO", x_nm:20.00, y_nm:-37.67 },
+  BADNO: { id:3005, name:"BADNO", x_nm:30.17, y_nm:-38.83 },
+  BADUP: { id:3006, name:"BADUP", x_nm:21.21, y_nm:-57.30 },
+  DIPKI: { id:3007, name:"DIPKI", x_nm:22.48, y_nm:-65.83 },
+  TENVO: { id:3008, name:"TENVO", x_nm:34.27, y_nm:-67.52 },
+  MASIV: { id:3009, name:"MASIV", x_nm:37.17, y_nm:-54.50 },
+  INDIG: { id:3010, name:"INDIG", x_nm:42.58, y_nm:-53.51 },
+  OBOKU: { id:3011, name:"OBOKU", x_nm:42.68, y_nm:-68.68 },
+  MOLIL: { id:3012, name:"MOLIL", x_nm:42.94, y_nm:-89.00 },
+  ERPAB: { id:3013, name:"ERPAB", x_nm:54.47, y_nm:-91.77 },
+  PENEX: { id:3014, name:"PENEX", x_nm:89.66, y_nm:-87.50 },
+  VAVEK: { id:3015, name:"VAVEK", x_nm:86.86, y_nm:-95.37 },
+  BIMPA: { id:3016, name:"BIMPA", x_nm:107.88, y_nm:-76.82 },
+  GODIL: { id:3017, name:"GODIL", x_nm:124.42, y_nm:-79.70 },
+  WAR: { id:3018, name:"WAR", x_nm:139.80, y_nm:-70.26 },
+  LOLSI: { id:3019, name:"LOLSI", x_nm:111.60, y_nm:-65.56 },
+  SOXER: { id:3020, name:"SOXER", x_nm:114.26, y_nm:-56.74 },
+  AGAVA: { id:3021, name:"AGAVA", x_nm:115.99, y_nm:-29.23 },
+  NUBLI: { id:3022, name:"NUBLI", x_nm:112.66, y_nm:-17.47 },
+  MAKOV: { id:3023, name:"MAKOV", x_nm:84.27, y_nm:-2.74 },
+  BAREX: { id:3024, name:"BAREX", x_nm:70.62, y_nm:13.43 },
+  SUDOL: { id:3025, name:"SUDOL", x_nm:58.08, y_nm:27.58 },
+  MAPIK: { id:3026, name:"MAPIK", x_nm:51.80, y_nm:35.26 },
+  NUMBA: { id:3027, name:"NUMBA", x_nm:46.46, y_nm:44.30 },
+  REGLI: { id:3028, name:"REGLI", x_nm:42.27, y_nm:65.95 },
+  AMTEK: { id:3029, name:"AMTEK", x_nm:40.50, y_nm:66.89 },
+  DESEN: { id:3030, name:"DESEN", x_nm:23.40, y_nm:50.66 },
+  LAGAR: { id:3031, name:"LAGAR", x_nm:-58.07, y_nm:16.71 },
+  TOMTI: { id:3032, name:"TOMTI", x_nm:-60.59, y_nm:6.95 },
+  RASAN: { id:3033, name:"RASAN", x_nm:-68.56, y_nm:4.32 },
+  OKX: { id:3034, name:"OKX", x_nm:-70.49, y_nm:9.46 },
+  GOLOP: { id:3035, name:"GOLOP", x_nm:-92.69, y_nm:28.96 },
+  PR532: { id:3036, name:"PR532", x_nm:-88.89, y_nm:50.12 },
+  LKPR: { id:3037, name:"LKPR", x_nm:-102.88, y_nm:56.94 },
+  EPWR: { id:3038, name:"EPWR", x_nm:-0.13, y_nm:-0.14 },
+  WR603: { id:3039, name:"WR603", x_nm:15.13, y_nm:7.00 },
+  LATAG: { id:3040, name:"LATAG", x_nm:-41.62, y_nm:-38.18 },
+  AKAPI: { id:3041, name:"AKAPI", x_nm:-14.60, y_nm:-49.39 },
+  CZE: { id:3042, name:"CZE", x_nm:-4.77, y_nm:-62.06 },
+  OBOLA: { id:3043, name:"OBOLA", x_nm:-23.84, y_nm:-66.51 },
+  KELOD: { id:3044, name:"KELOD", x_nm:-35.61, y_nm:-69.02 },
+  BAREP: { id:3045, name:"BAREP", x_nm:-47.65, y_nm:-71.54 },
+  JED: { id:3046, name:"JED", x_nm:128.24, y_nm:26.78 },
+  EPPO: { id:3047, name:"EPPO", x_nm:-1.14, y_nm:-79.24 },
+  KORUP: { id:3048, name:"KORUP", x_nm:-80.00, y_nm:-31.23 },
+  GOVEN: { id:3049, name:"GOVEN", x_nm:-78.06, y_nm:-59.53 },
+  SUI: { id:3050, name:"SUI", x_nm:-83.63, y_nm:-79.47 },
+  PEVUM: { id:3051, name:"PEVUM", x_nm:67.08, y_nm:-71.92 },
+  AMUTO: { id:3052, name:"AMUTO", x_nm:77.52, y_nm:-73.48 },
+  DOSIX: { id:3053, name:"DOSIX", x_nm:87.68, y_nm:-74.78 },
+  LDZ: { id:3054, name:"LDZ", x_nm:104.01, y_nm:-42.17 },
+  ABAKU: { id:3055, name:"ABAKU", x_nm:82.42, y_nm:-34.17 },
+  BAXIS: { id:3056, name:"BAXIS", x_nm:74.89, y_nm:-41.94 },
+  UTOLU: { id:3057, name:"UTOLU", x_nm:74.78, y_nm:-47.22 },
+  OKENO: { id:3058, name:"OKENO", x_nm:64.51, y_nm:-27.78 },
+  BAGAP: { id:3059, name:"BAGAP", x_nm:108.41, y_nm:-30.09 },
+  VALUD: { id:3060, name:"VALUD", x_nm:99.89, y_nm:-54.93 },
+  EPWA: { id:3061, name:"EPWA", x_nm:161.31, y_nm:-65.25 },
+  EPMO: { id:3062, name:"EPMO", x_nm:140.01, y_nm:-81.91 },
+  EPKT: { id:3063, name:"EPKT", x_nm:83.47, y_nm:38.30 },
+  EPKK: { id:3064, name:"EPKK", x_nm:111.24, y_nm:61.49 },
+  UVIVI: { id:3065, name:"UVIVI", x_nm:38.23, y_nm:-28.62 },
+  LUNUK: { id:3066, name:"LUNUK", x_nm:44.55, y_nm:-20.72 },
+  VAGSA: { id:3067, name:"VAGSA", x_nm:25.82, y_nm:-13.52 },
+  DEVEG: { id:3068, name:"DEVEG", x_nm:22.94, y_nm:14.50 },
+  SABAB: { id:3069, name:"SABAB", x_nm:38.75, y_nm:20.42 },
+  EPOPA: { id:3070, name:"EPOPA", x_nm:34.40, y_nm:44.50 },
+  PEKOT: { id:3071, name:"PEKOT", x_nm:20.73, y_nm:43.60 },
+  DINOV: { id:3072, name:"DINOV", x_nm:-30.14, y_nm:11.87 },
+  EKSEK: { id:3073, name:"EKSEK", x_nm:-49.15, y_nm:-3.01 },
+  NUPLU: { id:3074, name:"NUPLU", x_nm:-33.17, y_nm:-2.77 },
+  LUXAR: { id:3075, name:"LUXAR", x_nm:144.83, y_nm:60.88 },
+  NUDRO: { id:3076, name:"NUDRO", x_nm:17.22, y_nm:-2.88 },
+  TRZ: { id:3077, name:"TRZ", x_nm:8.74, y_nm:-12.27 },
+  VELAB: { id:3078, name:"VELAB", x_nm:-4.47, y_nm:-21.70 },
+  ARMEX: { id:3079, name:"ARMEX", x_nm:9.49, y_nm:-23.37 },
+  AGALU: { id:3080, name:"AGALU", x_nm:19.23, y_nm:-21.69 },
+  RASUT: { id:3081, name:"RASUT", x_nm:-23.55, y_nm:-2.72 },
+  ROTOL: { id:3082, name:"ROTOL", x_nm:-22.67, y_nm:7.72 },
+  ETNEL: { id:3083, name:"ETNEL", x_nm:10.33, y_nm:15.77 },
+  GOBAX: { id:3084, name:"GOBAX", x_nm:-113.88, y_nm:-27.51 },
+  OKG: { id:3085, name:"OKG", x_nm:-127.39, y_nm:33.49 },
+  MIKOV: { id:3086, name:"MIKOV", x_nm:0.58, y_nm:105.43 },
+  VALPI: { id:3087, name:"VALPI", x_nm:51.82, y_nm:95.57 },
+  GRU: { id:3088, name:"GRU", x_nm:72.85, y_nm:-130.19 },
+  ETUBO: { id:3089, name:"ETUBO", x_nm:195.19, y_nm:-68.21 },
+  CHO: { id:3090, name:"CHO", x_nm:-42.82, y_nm:-108.62 },
+  LEGNO: { id:3091, name:"LEGNO", x_nm:200.88, y_nm:-12.01 },
+  EPLL: { id:3092, name:"EPLL", x_nm:94.91, y_nm:-37.48 },
+  MISKA: { id:3093, name:"MISKA", x_nm:2.20, y_nm:-4.86 },
+});
 
-/* ── helper lists ─────────────────────────────────────────────── */
-const STATIC_RING_FIXES = [
-  WP.ENE.id, WP.ESE.id, WP.WNW.id, WP.WSW.id,
-  WP.N01.id, WP.S01.id, WP.E01.id, WP.W01.id
-];
-const isRing = id => STATIC_RING_FIXES.includes(id);
-
-
-// Make an immutable array for drawing labels if you want
+// Rebuild WP_ALL and edge-gate list
 const WP_ALL = Object.values(WP);
 
-// Airways are pairs of waypoint ids (segments)
-const AIRWAYS = [
-  [WP.WNW.id, WP.CTR.id], [WP.CTR.id, WP.ENE.id],
-  [WP.WSW.id, WP.CTR.id], [WP.CTR.id, WP.ESE.id],
-  [WP.N01.id, WP.CTR.id], [WP.CTR.id, WP.S01.id],
-  [WP.CTR.id, WP.E01.id], [WP.W01.id, WP.CTR.id], // NEW links
-];
+
 
 
 // helper
@@ -1240,86 +1185,203 @@ function findFixByName(name){
       || null;
 }
 
-// ---- Routing config + helpers (avoid dogpiling CTR) ----
-const EDGE_FIXES = [
-  WP.ENE.id, WP.ESE.id, WP.WNW.id, WP.WSW.id, WP.N01.id, WP.S01.id,
-  WP.E01.id, WP.W01.id
-];
+// === HARD-CODED ROUTES (parsed from human-friendly list) ===================
+// Paste your list verbatim in ROUTE_TEXT. Parser will do the rest.
+const ROUTE_TEXT = `
+EPWA dep: (climbing fl240)
+WAR LOLSI INDIG MASIV BADUP CZE OBOLA KELOD BAREP SUI
+WAR SOXER BAXIS UVIVI AGALU NUPLU TOMTI OKX OKG
 
+EPWA arr:
+SUI BAREP KELOD OBOLA CZE DIPKI TENVO OBOKU PEVUM AMUTO DOSIX BIMPA GODIL WAR
+GOBAX KORUP LATAG AKAPI CZE DIPKI TENVO OBOKU PEVUM AMUTO DOSIX BIMPA GODIL WAR
+LAGAR VAGSA LUNUK OKENO AGAVA WAR
 
-const ROUTE_CFG = {
-  goViaCTRProb: 0.00,     // 20% still via CTR; set 0 to ban it
-  innerRadiusNm: 16,      // pick a dynamic fix within this radius of center
-  addMidProb: 0.3         // chance to include an inner mid-fix on transits/deps
-};
+EPMO dep: (climbing fl240)
+GODIL LOLSI INDIG MASIV BADUP CZE OBOLA KELOD BAREP SUI
+GODIL SOXER BAXIS UVIVI AGALU NUPLU TOMTI OKX OKG
 
-function pickInnerFixId(radiusNm = ROUTE_CFG.innerRadiusNm){
-  const cands = wpts.filter(w => Math.hypot(w.x_nm, w.y_nm) <= radiusNm);
-  if (cands.length) return cands[Math.random()*cands.length|0].id;
-  return WP.CTR.id; // fallback if no dynamic waypoints exist yet
-}
+EPMO arr:
+SUI BAREP KELOD OBOLA CZE DIPKI TENVO OBOKU PEVUM AMUTO DOSIX BIMPA GODIL
+GOBAX KORUP LATAG AKAPI CZE DIPKI TENVO OBOKU PEVUM AMUTO DOSIX BIMPA GODIL
 
-function randomEdge(excludeId=null){
-  const opts = EDGE_FIXES.filter(id => id !== excludeId);
-  return opts[Math.random()*opts.length|0];
-}
+EPKK dep: (climbing fl280)
+NUMBA DINOV EKSEK LASIS GOBAX
+JED NUBLI BAGAP VALUD PENEX VAVEK GRU
 
-function enforceRingEnds(route){
-  // strip any *interior* ring fixes that might already be there
-  route = route.filter((id, idx) =>
-    idx === 0 || idx === route.length-1 || !isRing(id));
+EPKK arr:
+GOBAX LASIS NUPLU ETNEL MAPIK
+GRU VAVEK PENEX VALUD LDZ BAGAP NUBLI JED
 
-  // make sure first is a ring fix ───────────────────────────────
-  if (!isRing(route[0])){
-    const nearest = STATIC_RING_FIXES
-      .reduce((best, fid) => {
-        const w = getWPById(fid);
-        const d = Math.hypot(w.x_nm, w.y_nm);    // from centre is fine
-        return d < best.dist ? {id: fid, dist: d} : best;
-      }, {id: null, dist: Infinity}).id;
-    route.unshift(nearest);
+EPKT dep: (climbing fl240)
+NUMBA DINOV EKSEK LASIS GOBAX
+JED NUBLI BAGAP VALUD PENEX VAVEK GRU
+
+EPKT arr:
+GOBAX LASIS NUPLU ETNEL MAPIK
+GRU VAVEK PENEX VALUD LDZ BAGAP NUBLI JED
+
+EPWR dep: (climbing f100)
+RASUT NUPLU EKSEK NAROX GOBAX
+RASUT NUPLU TOMTI OKX OKG
+DEVEG SABAB SUDOL LUXAR
+ETNEL PEKOT DESEN MIKOV
+DEVEG EPOPA AMTEK
+VAGSA LUNUK OKENO AGAVA WAR (to EPWA)
+
+EPWR arr:
+LAGAR ROTOL WR603
+GOBAX NAROX EKSEK NUPLU WR603
+LUXAR SUDOL SABAB DEVEG WR603
+
+EPLL dep: (climbing fl100)
+UTOLU INDIG MASIV BADUP CZE OBOLA KELOD BAREP SUI
+BAXIS UVIVI AGALU NUPLU TOMTI OKX OKG
+
+EPLL arr:
+SUI BAREP KELOD OBOLA CZE BADUP MASIV INDIG UTOLU
+LAGAR DINOV MISKA VAGSA LUNUK ABAKU
+
+EPPO dep: (climbing fl190)
+OBOLA LATAG RASAN OKX OKG
+CZE XIDNA ARMEX NUDRO DEVEG EPOPA AMTEK VALPI
+
+EPPO arr:
+JED BAREX BESTO CZE
+VALPI REGLI EPOPA DEVEG NUDRO ARMEX XIDNA CZE
+TOMTI DIMEX AKAPI CZE
+
+LKPR dep: (climbing fl270)
+PR532 GOLOP LAGAR VAGSA LUNUK OKENO ABAKU LDZ ETUBO
+PR532 GOLOP TOMTI DIMEX AKAPI CZE
+
+LKPR arr:
+WAR SOXER BAXIS UVIVI AGALU NUPLU TOMTI OKX GOLOP PR532
+OBOLA LATAG RASAN OKX GOLOP PR532
+
+now for the transits:
+MIKOV DESEN PEKOT ETNEL VELAB AKAPI OBOLA CHO
+MIKOV DESEN PEKOT ETNEL VELAB DIMEX LATAG GOVEN
+VALPI REGLI EPOPA DEVEG NUDRO TRZ DIMEX GOVEN
+VALPI REGLI EPOPA DEVEG NUDRO ARMEX XIDNA CZE
+LUXAR SUDOL SABAB NUDRO ARMEX XIDNA CZE
+LUXAR SUDOL SABAB NUDRO TRZ DIMEX GOVEN
+LUXAR NUMBA DINOV EKSEK LASIS GOBAX
+LUXAR JED NUBLI LDZ VALUD PENEX VAVEK
+LUXAR JED MAKOV BADNO CZE CHO
+LEGNO LDZ UTOLU INDIG MASIV BADUP CZE OBOLA KELOD BAREP SUI
+LEGNO LDZ BAXIS UVIVI AGALU NUPLU TOMTI OKX OKG
+WAR UTOLU INDIG MASIV BADUP CZE OBOLA KELOD BAREP SUI
+WAR UTOLU INDIG MASIV BADUP CZE CHO
+WAR INDIG LATAG KORUP
+GRU VAVEK PENEX VALUD LDZ BAGAP NUBLI JED LUXAR
+GRU ERPAB OBOKU INDIG UVIVI SABAB DESEN MIKOV
+GRU ERPAB OBOKU INDIG UVIVI SABAB DESEN VALPI
+GRU OBOLA LATAG RASAN OKX OKG
+SUI BAREP KELOD OBOLA CZE BADUP MASIV INDIG LDZ LEGNO
+SUI BAREP KELOD OBOLA CZE BADNO UVIVI LUNUK BAREX JED
+SUI BAREP KELOD OBOLA CZE BADNO UVIVI LUNUK BAREX LUXAR
+GOVEN LATAG DIMEX VELAB TRZ BAREX JED
+GOVEN LATAG DIMEX VELAB TRZ NUDRO SUDOL LUXAR
+GOVEN LATAG DIMEX VELAB TRZ PEKOT DESEN VALPI
+GOVEN LATAG DIMEX VELAB TRZ PEKOT DESEN MIKOV
+GOBAX LASIS RASUT DEVEG SABAB SUDOL LUXAR
+GOBAX LASIS RASUT DEVEG SABAB SUDOL JED
+GOBAX LASIS NUPLU ETNEL PEKOT DESEN VALPI
+GOBAX LASIS NUPLU ETNEL PEKOT DESEN MIKOV
+OKG LAGAR VAGSA LUNUK OKENO ABAKU LDZ ETUBO
+OKG TOMTI DIMEX AKAPI CZE CHO
+OKG TOMTI DIMEX AKAPI CZE
+CHO CZE BESTO VAGSA EPOPA AMTEK VALPI
+`;
+
+// Parse headers + rows → { dep:{ICAO:[...names]}, arr:{ICAO:[...names]}, transit:[...names] }
+function parseRouteTemplates(text){
+  const dep={}, arr={}, transit=[];
+  let mode=null, apt=null;
+  for(const raw of text.split(/\r?\n/)){
+    const line = raw.trim();
+    if(!line) continue;
+    const m = line.match(/^([A-Z]{4})\s+(dep|arr)\s*:?/i);
+    if(m){ apt=m[1].toUpperCase(); mode=m[2].toLowerCase(); continue; }
+    if(/^now for the transits/i.test(line) || /^all of .*transit/i.test(line)){ mode='transit'; apt=null; continue; }
+    const cleaned = line.replace(/\([^)]*\)/g,'').trim();
+    if(!cleaned) continue;
+    const names = cleaned.split(/\s+/).map(s=>s.toUpperCase());
+    if(!names.length) continue;
+    if(mode==='dep' && apt){ (dep[apt]??=[]).push([apt, ...names]); }
+    else if(mode==='arr' && apt){ (arr[apt]??=[]).push([...names, apt]); }
+    else if(mode==='transit'){ transit.push(names); }
   }
+  return {dep, arr, transit};
+}
+const ROUTE_TEMPLATES = parseRouteTemplates(ROUTE_TEXT);
 
-  // make sure last is a *different* ring fix ────────────────────
-  if (!isRing(route[route.length-1]))
-    route.push( randomEdge(route[0]) );
-
-  // collapse accidental duplicates (ENE, ENE → ENE) -------------
-  for (let i=route.length-1; i>0; i--)
-    if (route[i] === route[i-1]) route.splice(i,1);
-
-  return route;
+// Convert names → IDs (drop routes with unknown fixes)
+function namesToIds(names){
+  const ids=[], missing=[];
+  for(const nm of names){
+    const w = findFixByName(nm); // uses your static WP + any dynamic wpts
+    if(!w) missing.push(nm); else ids.push(w.id);
+  }
+  if(missing.length){
+    console.warn('[Routes] Skipping (missing fixes):', missing.join(', '), 'in', names.join(' → '));
+    return null;
+  }
+  return ids;
 }
 
-// Force the first leg to the **nearest** static ring fix to the spawn,
-// but keep the rest of the route intact and ring-clean.
-function alignFirstFixToSpawn(route, spawnX_nm, spawnY_nm){
-  if (!route.length) return route;
-
-  // find closest ring fix to the spawn coords
-  let nearest = route[0], best = Infinity;
-  for (const fid of STATIC_RING_FIXES){
-    const w = getWPById(fid);
-    const d = Math.hypot(w.x_nm - spawnX_nm, w.y_nm - spawnY_nm);
-    if (d < best){ best = d; nearest = fid; }
-  }
-
-  // slam it in as the first leg
-  route[0] = nearest;
-
-  // make sure the exit isn’t the same ring fix
-  if (route.length > 1 && route[route.length-1] === route[0]){
-    route[route.length-1] = randomEdge(route[0]);   // pick any other ring
-  }
-
-  // if we now have two ring fixes in a row, collapse the duplicate
-  for (let i = route.length-1; i > 0; i--){
-  if (route[i] === route[i-1]) {      // only drop exact duplicates
-    route.splice(i,1);
-  }
+const DEP_ROUTES_ID = {};
+for(const [apt, list] of Object.entries(ROUTE_TEMPLATES.dep)){
+  const ok = list.map(namesToIds).filter(Boolean);
+  if(ok.length) DEP_ROUTES_ID[apt] = ok;
 }
-  return route;
+const ARR_ROUTES_ID = {};
+for(const [apt, list] of Object.entries(ROUTE_TEMPLATES.arr)){
+  const ok = list.map(namesToIds).filter(Boolean);
+  if(ok.length) ARR_ROUTES_ID[apt] = ok;
 }
+const TRANSIT_ROUTES_ID = ROUTE_TEMPLATES.transit.map(namesToIds).filter(Boolean);
+
+const pickRand = arr => arr[Math.random()*arr.length|0];
+
+// === Route builders: only use your templates ===============================
+function buildDepartureRoute(fp){
+  const keys = Object.keys(DEP_ROUTES_ID);
+  if(!keys.length) return [];
+  const apt = (fp && DEP_ROUTES_ID[fp.dep]) ? fp.dep : pickRand(keys);
+  return pickRand(DEP_ROUTES_ID[apt]).slice();
+}
+function buildArrivalRoute(fp){
+  const keys = Object.keys(ARR_ROUTES_ID);
+  if(!keys.length) return [];
+  const apt = (fp && ARR_ROUTES_ID[fp.dest]) ? fp.dest : pickRand(keys);
+  return pickRand(ARR_ROUTES_ID[apt]).slice();
+}
+function buildTransitRoute(/*fp*/){
+  return TRANSIT_ROUTES_ID.length ? pickRand(TRANSIT_ROUTES_ID).slice() : [];
+}
+
+// === Optional: override makeSFP() so spawns use airports we have ===========
+function makeSFP({dep=null, dest=null, cruiseFL=360, tasKt=450, type=null}={}){
+  const depKeys = Object.keys(DEP_ROUTES_ID);
+  const arrKeys = Object.keys(ARR_ROUTES_ID);
+  const pick = a => a[Math.random()*a.length|0];
+  const depApt = dep && DEP_ROUTES_ID[dep] ? dep : (depKeys.length ? pick(depKeys) : null);
+  // try not to pick the same code for dest if avoidable
+  let destApt = dest && ARR_ROUTES_ID[dest] ? dest : (arrKeys.length ? pick(arrKeys) : null);
+  if(destApt && depApt && arrKeys.length>1 && destApt===depApt){
+    do{ destApt = pick(arrKeys); } while(destApt===depApt);
+  }
+  return { dep:depApt, dest:destApt, cruiseFL, tasKt, type: type ?? pick(TYPES) };
+}
+
+console.info('[Routes] Loaded:',
+  Object.keys(DEP_ROUTES_ID).length, 'dep apts,',
+  Object.keys(ARR_ROUTES_ID).length, 'arr apts,',
+  TRANSIT_ROUTES_ID.length, 'transit options');
+
+
 
 
 
@@ -1346,7 +1408,7 @@ function armCooldown(){ AutoSpawn.cooldownSec = randGap(); }
 function disarmCooldown(){ AutoSpawn.cooldownSec = Infinity; }
 
 // routeMode can be 'arrival' | 'departure' | 'transit' | null
-function spawnWithParams({x_nm,y_nm,hdg,alt_ft,spd_kt, jitterDeg=0, routeMode=null}, fp=null){
+function spawnWithParams({x_nm,y_nm,hdg,alt_ft,spd_kt, jitterDeg=0, routeMode=null, routeOverride=null}, fp=null){
   const a = new Aircraft({ x_nm, y_nm, hdg, alt_ft, spd_kt, fp });
 
   if (jitterDeg) hdg = mod360(hdg + rand(-jitterDeg, +jitterDeg));
@@ -1354,44 +1416,75 @@ function spawnWithParams({x_nm,y_nm,hdg,alt_ft,spd_kt, jitterDeg=0, routeMode=nu
   a.inSector = env.inRect(a.x_nm, a.y_nm);
 
   if (fp) {
-    // Decide routing mode if caller didn't force one
-    let mode = routeMode ?? (!env.inRect(x_nm, y_nm) ? 'arrival' : 'departure');
+  // Decide routing mode if caller didn't force one
+  let mode = routeMode ?? (!env.inRect(x_nm, y_nm) ? 'arrival' : 'departure');
 
-    // 1) BUILD the route first
-    let route;
-    if (mode === 'transit')      route = buildTransitRoute(fp);
-    else if (mode === 'arrival') route = buildArrivalRoute(fp);
-    else                         route = buildDepartureRoute(fp);
+  // 1) Build from templates only
+  let route;
+  if (mode === 'transit')      route = buildTransitRoute(fp);
+  else if (mode === 'arrival') route = buildArrivalRoute(fp);
+  else                         route = buildDepartureRoute(fp);
 
-    // 2) Tidy & align after it exists
-    if (Array.isArray(route) && route.length){
-      route = alignFirstFixToSpawn(route, x_nm, y_nm);
-
-      if (mode === 'arrival') {
-        if (route[route.length-1] !== WP.CTR.id) route.push(WP.CTR.id);
-      } else if (mode === 'departure') {
-        if (route[0] !== WP.CTR.id) route.unshift(WP.CTR.id);
-      }
-
-      route = enforceRingEnds(route);
-      route = sanitizeMidpoints(route, GENTLE);
-a.setRoute(route);
-
-    }
+  // 2) Use exactly what was picked (no align/sanitize/CTR)
+  if (Array.isArray(route) && route.length){
+    a.setRoute(route);
   }
+}
+// Decide routing mode if caller didn't force one
+let mode = routeMode ?? (!env.inRect(x_nm, y_nm) ? 'arrival' : 'departure');
+
+// Use provided route if given; otherwise build from templates
+let route = routeOverride ? routeOverride.slice() :
+    (mode === 'transit' ? buildTransitRoute(fp) :
+        (mode === 'arrival' ? buildArrivalRoute(fp) : buildDepartureRoute(fp)));
+        
+if (Array.isArray(route) && route.length){
+    a.setRoute(route);
+}
+
 
   state.ac.push(a);
 
-  // Fallback: no route? at least fly toward nearest ring fix so it enters sensibly
-  if (!a.route.length){
-    a.directTo( nearestStaticFixId(a.x_nm, a.y_nm) );
+  // Fallback: no route? nudge toward the nearest known fix (static or dynamic)
+if (!a.route.length){
+  const allFixes = [...WP_ALL, ...wpts];
+  if (allFixes.length){
+    let bestId = null, bestD = Infinity;
+    for (const w of allFixes){
+      const d = Math.hypot(w.x_nm - a.x_nm, w.y_nm - a.y_nm);
+      if (d < bestD){ bestD = d; bestId = w.id; }
+    }
+    if (bestId != null) a.directTo(bestId);
   }
+}
+
 
   state.selectedId = a.id;
   flashSelected(); updateSelectedPanel(); drawAll();
   return a;
 }
 
+// Spawn ≤10 NM *outside* the first fix (i.e., farther from sector center),
+// and point the aircraft back to that fix.
+function spawnPointForTransitFirstFix(firstFixId){
+  const fix = getWPById(firstFixId);
+  if (!fix) return null;
+
+  // vector from sector center (0,0) to the fix
+  const vx = fix.x_nm, vy = fix.y_nm;
+  const len = Math.hypot(vx, vy) || 1;
+  const ux = vx / len, uy = vy / len;
+
+  // place 8–10 NM further *away* from the center along that ray
+  const dist = 8 + Math.random()*2; // 8..10 NM
+  const x = fix.x_nm + ux*dist;
+  const y = fix.y_nm + uy*dist;
+
+  // heading back toward the fix
+  const hdg = mod360(toDeg(Math.atan2(fix.x_nm - x, -(fix.y_nm - y))));
+
+  return { x_nm:x, y_nm:y, hdg };
+}
 
 
 function spawnPlannedAircraft(){
@@ -1438,7 +1531,22 @@ function spawnPlannedAircraft(){
     // treat as arrival route (could still avoid CTR per your ROUTE_CFG)
     return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd, routeMode:'arrival'}, fp);
   } else {
-    // true transit: edge -> inner/exit (route builder ensures exit ≠ entry)
+    // TRANSIT: build route first so we can spawn near its first fix
+    const route = buildTransitRoute(fp);
+    if (route && route.length){
+      const anchor = spawnPointForTransitFirstFix(route[0]);
+      if (anchor){
+        return spawnWithParams(
+          {
+            x_nm:anchor.x_nm, y_nm:anchor.y_nm, hdg:anchor.hdg,
+            alt_ft:alt, spd_kt:spd,
+            routeMode:'transit', routeOverride:route, jitterDeg:5
+          },
+          fp
+        );
+      }
+    }
+    // Fallback: generic edge spawn if anything failed
     return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd, routeMode:'transit'}, fp);
   }
 }
@@ -1820,49 +1928,30 @@ withMMB(wptEl, ()=>{
   }
 
   function drawScope(){
-  // Background (near-black)
   ctx.save();
   ctx.setTransform(1,0,0,1,0,0);
   ctx.globalAlpha = 1;
+
+  // clean background
   ctx.fillStyle = "#060707";
   ctx.fillRect(0,0,W,H);
 
-  // Very faint grid (optional)
-  ctx.strokeStyle = "#0b0b0b";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for(let x=0;x<W;x+=40){ ctx.moveTo(x,0); ctx.lineTo(x,H); }
-  for(let y=0;y<H;y+=40){ ctx.moveTo(0,y); ctx.lineTo(W,y); }
-  ctx.stroke();
-
-  // Faint range rings (no labels)
-  ctx.strokeStyle = "#141414";
-  ctx.lineWidth = 1;
-  const ringCount = 5;
-  for(let i=1;i<=ringCount;i++){
-    const r = (Math.min(W,H)/2) * i / ringCount;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI*2);
-    ctx.stroke();
-  }
-
-  // Crosshair
-  ctx.strokeStyle = "#1a1a1a";
-  ctx.beginPath();
-  ctx.moveTo(cx,0); ctx.lineTo(cx,H);
-  ctx.moveTo(0,cy); ctx.lineTo(W,cy);
-  ctx.stroke();
-
-  // Rectangular sector (subtle grey)
-  const halfWpx = nmToPx(env.rectW/2);
-  const halfHpx = nmToPx(env.rectH/2);
+  // sector polygon outline (no rings/grid/airways)
   ctx.strokeStyle = "#3a3a3a";
   ctx.lineWidth = 1.6;
   ctx.setLineDash([6,6]);
-  ctx.strokeRect(cx-halfWpx, cy-halfHpx, halfWpx*2, halfHpx*2);
+  ctx.beginPath();
+  for (let i=0;i<SECTOR_POLY.length;i++){
+    const [xn,yn] = SECTOR_POLY[i];
+    const x = cx + nmToPx(xn), y = cy + nmToPx(yn);
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.closePath();
+  ctx.stroke();
   ctx.setLineDash([]);
   ctx.restore();
 }
+
 
 
   function formatAltitude(ft){ return ft>=18000?("FL"+String(Math.round(ft/100)).padStart(3,'0')):((ft|0)+" ft"); }
@@ -1886,50 +1975,9 @@ withMMB(wptEl, ()=>{
 
 
   
-function drawAirways(){
-  ctx.save();
-  ctx.strokeStyle = "rgba(150, 200, 255, 0.5)";
-  ctx.lineWidth = 1.2;
-  ctx.setLineDash([2,10]);
-  for(const [a,b] of AIRWAYS){
-    const A = getWPById(a), B = getWPById(b);
-    if(!A || !B) continue;
-    const x1 = cx + nmToPx(A.x_nm), y1 = cy + nmToPx(A.y_nm);
-    const x2 = cx + nmToPx(B.x_nm), y2 = cy + nmToPx(B.y_nm);
-    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
-  }
-  ctx.restore();
-}
 
-  function drawWaypointsCrosses(){
-  // Airways (all nodes)
-  ctx.strokeStyle = "rgba(150, 200, 255, 0.5)";
-  ctx.lineWidth = 1;
-  ctx.setLineDash([4,8]); // faint dashed
-  ctx.beginPath();
-  for(const [aId,bId] of airways){
-    const A = getWPById(aId), B = getWPById(bId);
-    if(!A||!B) continue;
-    const x1 = cx + nmToPx(A.x_nm), y1 = cy + nmToPx(A.y_nm);
-    const x2 = cx + nmToPx(B.x_nm), y2 = cy + nmToPx(B.y_nm);
-    ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
-  }
-  ctx.stroke();
-  ctx.setLineDash([]);
 
-  // Static crosses (cyan-ish)
-  for(const w of WP_ALL){
-    const x=cx+nmToPx(w.x_nm), y=cy+nmToPx(w.y_nm);
-    ctx.strokeStyle="#9ad6ff"; ctx.lineWidth=1.2;
-    ctx.beginPath(); ctx.moveTo(x-6,y); ctx.lineTo(x+6,y); ctx.moveTo(x,y-6); ctx.lineTo(x,y+6); ctx.stroke();
-  }
-  // Dynamic crosses (magenta-ish like before)
-  for(const w of wpts){
-    const x=cx+nmToPx(w.x_nm), y=cy+nmToPx(w.y_nm);
-    ctx.strokeStyle="#ff7bff"; ctx.lineWidth=1.2;
-    ctx.beginPath(); ctx.moveTo(x-6,y); ctx.lineTo(x+6,y); ctx.moveTo(x,y-6); ctx.lineTo(x,y+6); ctx.stroke();
-  }
-}
+  
 
 
 
@@ -2075,8 +2123,6 @@ function handleMeasureSmartClick(xPx, yPx){
 
   function drawCanvasBase(){
   drawScope();
-  drawAirways();
-  drawWaypointsCrosses();
   detectConflicts();
 
   for(const a of state.ac){
@@ -2370,10 +2416,13 @@ document.getElementById('spawnConflict').addEventListener('click', ()=>{
 
   document.getElementById('spd250').addEventListener('change', e=>{ env.restrict250=e.target.checked; });
 
-  document.getElementById('addWpt').addEventListener('click', e=>{
-    state.addingWpt=!state.addingWpt; e.target.textContent=state.addingWpt?"Click scope…":"Add waypoint";
-  });
-  document.getElementById('clearWpt').addEventListener('click', clearWaypoints);
+  document.getElementById('addWpt').addEventListener('click', ()=>{
+  alert("Dynamic waypoints are disabled in this version.");
+});
+document.getElementById('clearWpt').addEventListener('click', ()=>{
+  alert("Dynamic waypoints are disabled in this version.");
+});
+
 
   document.getElementById('autoHandoff').addEventListener('change', e=>{ env.autoHandoff=e.target.checked; });
   document.getElementById('btnHandoff').addEventListener('click', ()=>{
@@ -2475,17 +2524,19 @@ bindEnterAndHighlight('vs',   'btnAlt',  'vs');  // VS shares the ALT apply
     }
   });
 
-// Start AFTER the page has laid out (canvas has real size)
 window.addEventListener('load', () => {
-  resize();            // compute sizes once
+  resize();
   renderWptList();
-  seedWaypointsInside(15);   // tweak the number if you want more/less
-  buildAirways(2);           // connect each fix to 2 nearest neighbors
+  // NEW: sync the actual range to the selected option (160 by default)
+  rangeNM = parseInt(document.getElementById('rangeSel').value, 9) || 120;
+
   spawnAircraft();
   spawnAircraft();
-  booted = true;       // now future resizes can redraw
+  booted = true;
   drawAll();
 });
+
+
 </script>
 </body>
 </html>
