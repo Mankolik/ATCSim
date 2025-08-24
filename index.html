@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>ATC Radar Trainer — v7</title>
+<title>ATC Radar Trainer — v7.1</title>
 <style>
   :root{
   /* Near-black scope */
@@ -100,7 +100,19 @@ body.label-lg .tag .l2{ font-size:14px }
   .tag.alert{border-color:var(--alert)}
   .tag.warn{border-color:var(--warn)}
   .pill{padding:2px 6px; border:1px solid #2c4a5f; border-radius:999px; background:#0c1b25; font-size:11px; color:var(--muted)}
-  .waypointLabel{position:absolute; background:transparent; border:0px solid #2c4a5f; border-radius:6px; padding:0px 6px; font-size:11px; color:#cde; opacity:.85}
+  .waypointLabel{
+  position:absolute;
+  background:transparent;
+  border:0 solid #2c4a5f;
+  border-radius:6px;
+  padding:0 6px;
+  font-size:11px;
+  color:#9fb3c1;
+  opacity:.55;
+  user-select:none;
+  pointer-events:none;
+}
+
   /* --- SFP floating window --- */
 .sfpWin{
   position:absolute; right:12px; top:64px; width:260px;
@@ -130,7 +142,7 @@ body.label-lg .tag .l2{ font-size:14px }
 </head>
 <body>
 <header>
-  <h1>ATC Radar Trainer — v7</h1>
+  <h1>ATC Radar Trainer — v7.1</h1>
   <div class="controls">
     <button id="spawn">Spawn traffic</button>
     <label class="small">
@@ -317,6 +329,24 @@ Esc = delete last ruler</div>
 const FIX_PASS_NM = 1.2;       // consider a fix 'made' when within this many NM
 const FIX_PASS_TREND_NM = 2.0; // or, if we've been closer than this and range starts increasing, also 'made'
 
+function managedSpeedTargetKt(a){
+  const alt = a.alt_ft;
+
+  // Climb/High-level schedule
+  let tgt = (alt <  5000) ? 220 :
+            (alt < 10000) ? 240 :
+            (alt < 24000) ? 300 :
+                            (a.fp?.tasKt || 450);
+
+  // Descents and arrivals slow progressively
+  if (a.vs_fpm < -200 || a.role === 'arrival'){
+    if (alt < 12000) tgt = Math.min(tgt, 280);
+    if (alt < 10000) tgt = Math.min(tgt, 240);
+    if (alt <  6000) tgt = Math.min(tgt, 220);
+    if (alt <  3000) tgt = Math.min(tgt, 200);
+  }
+  return tgt;
+}
 
   function isaSpeedOfSoundKts(alt_ft){
     const h = Math.max(0, Math.min(86000, alt_ft)) * 0.3048;
@@ -383,14 +413,32 @@ function getTrackState(a){
 }
 
   // --- Short Flight Plan (SFP) & helpers ---
-const DEP_PORTS = ["EPWA","EPKT","EPPO"];   // tweak later
-const ARR_PORTS = ["EDDF","EPWR","EPLL"];   // tweak later
+const DEP_PORTS = ["EPWA","EPMO","EPLL","EPWR","EPPO","EPKK","EPKT","LKPR"];
+const ARR_PORTS = ["EPWA","EPMO","EPLL","EPWR","EPPO","EPKK","EPKT","LKPR"];
 const TYPES     = ["A320","B738","E190","B744","B789"];
 
 const rand = (a,b)=> a + Math.random()*(b-a);
 const randi = (a,b)=> Math.floor(rand(a,b+1));
 const pick = arr => arr[Math.floor(Math.random()*arr.length)];
 
+// Departures: climb targets per airport (Flight Levels)
+const DEPART_CLIMB_FL = {
+  EPWA: 240,
+  EPMO: 240,
+  EPLL: 100,
+  EPWR: 100,
+  EPPO: 190,
+  EPKK: 280,  
+  EPKT: 180,
+  LKPR: 270
+};
+
+// Helper: pick a random valid departure airport that exists in WP
+function pickDepartureAirport(){
+  const names = Object.keys(DEPART_CLIMB_FL);
+  const fixes = names.map(n => WP[n]).filter(Boolean);
+  return fixes.length ? fixes[Math.floor(Math.random()*fixes.length)] : null;
+}
 
 
 function forceMidBetween(entryId, exitId){
@@ -471,6 +519,10 @@ function resolveEndpoint(ep){
       this.type = opts.type ?? pick(TYPES);   // <-- new: default a random type
       this.route = [];         // array of waypoint ids
       this.routeIdx = 0;       // current active leg target index
+      this.role = opts.role ?? null;     // 'arrival' | 'departure' | 'transit'
+      this.finishedAtSec = null;         // when last fix passed
+      this.managedSpd = true;            // auto schedule until pilot sets speed
+
 
 
 
@@ -513,8 +565,18 @@ this.hoMarked   = false;                             // we marked H/O manually
     setAltitude(alt_ft,vs=null){ this.tgtAlt=Math.max(0,Math.round(alt_ft));
       const sign=this.tgtAlt>this.alt_ft?1:-1; const mag=Math.max(0,Math.abs(vs??this.defaultVS)); this.vs_fpm=sign*mag; }
     holdAltitude(){ this.tgtAlt=this.alt_ft; this.vs_fpm=0; }
-    setSpeedKt(kt){ this.tgtSpeedMode="KT"; this.tgtSpd_kt=Math.max(60,kt|0); this.tgtMach=null; }
-    setMach(m){ this.tgtSpeedMode="MACH"; this.tgtMach=clamp(m,0.3,0.99); }
+    setSpeedKt(kt){
+  this.tgtSpeedMode="KT";
+  this.tgtSpd_kt=Math.max(60, kt|0);
+  this.tgtMach=null;
+  this.managedSpd = false;
+}
+    setMach(m){
+  this.tgtSpeedMode="MACH";
+  this.tgtMach=clamp(m,0.3,0.99);
+  this.managedSpd = false;
+}
+
     directTo(id){ this.navMode="DIRECT"; this.directWptId=id; }
     get mach(){ return this.spd_kt/isaSpeedOfSoundKts(this.alt_ft); }
       setRoute(ids){
@@ -526,6 +588,13 @@ this.hoMarked   = false;                             // we marked H/O manually
 
 
     update(dt, env){
+        // Auto speed schedule (until user overrides)
+      if (this.managedSpd){
+  this.tgtSpeedMode = "KT";
+  this.tgtSpd_kt    = managedSpeedTargetKt(this);
+  this.tgtMach      = null;
+}
+
       if(this.tgtSpeedMode==="MACH" && this.tgtMach) this.tgtSpd_kt=this.tgtMach*isaSpeedOfSoundKts(this.alt_ft);
       let targetSpd=this.tgtSpd_kt;
       if(env.restrict250 && this.alt_ft<=10000) targetSpd=Math.min(targetSpd,250);
@@ -559,6 +628,10 @@ if (this.navMode==="DIRECT" && this.directWptId!=null){
         // No FPL/no next fix → continue present heading
         this.navMode = null;
         this.tgtHdg = this.hdg;
+        // If we just passed the last route fix, mark finished time
+        if (idxInRoute >= 0 && idxInRoute === (this.route?.length || 0) - 1){
+            if (this.finishedAtSec == null) this.finishedAtSec = simNowSec;
+        }
       }
       this.prevDistToTarget = null;
       this.lastNavTargetId  = null;
@@ -599,9 +672,11 @@ if (this.navMode==="ROUTE" && this.routeIdx < this.route.length){
       this.lastNavTargetId  = null;
 
       if (this.routeIdx >= this.route.length){
-        this.navMode = null;   // route complete → continue present heading
-        this.tgtHdg = this.hdg;
-      }
+  this.navMode = null;   // route complete → continue present heading
+  this.tgtHdg = this.hdg;
+  if (this.finishedAtSec == null) this.finishedAtSec = simNowSec;
+     }
+
     } else {
       this.lastNavTargetId  = targetId;
       this.prevDistToTarget = dist;
@@ -650,12 +725,21 @@ if (inside !== this.inSector) {
     this.handoffPending = true;
     this.pendingState = inside;
   }
-  if (leftSector) {
-    // leaving sector: stop any nav guidance and keep current track
-    this.navMode = null;
-    this.directWptId = null;
-    this.tgtHdg = this.hdg; // hold present heading
+    if (leftSector) {
+    // On exit: go DIRECT to the final fix in the current FPL (if any).
+    const hasRoute = Array.isArray(this.route) && this.route.length > 0;
+    if (hasRoute) {
+      const lastId = this.route[this.route.length - 1];
+      this.directTo(lastId);
+      this.navMode = "DIRECT";
+    } else {
+      // no plan — keep present heading as a fallback
+      this.navMode = null;
+      this.directWptId = null;
+      this.tgtHdg = this.hdg;
+    }
   }
+
 }
 
       // Dotted trail (every step call adds one); keep only last 5
@@ -1393,6 +1477,11 @@ const SPAWN = {
   jitterDeg: 45    // ± jitter to avoid perfectly cardinal inbounds
 };
 
+// === Despawn policy (last-fix / FL0) =========================
+const DESPAWN_AFTER_LASTFIX_SEC = 25;  // X sec after passing final FPL fix
+const DESPAWN_FL0_FT            = 50;  // arrivals despawn at/under ~FL0
+const NEVER_SEEN_MAX_SEC        = 1200; // safety: 20 min if truly never visible
+
 // --- Auto spawner (cooldown-based; guarantees ≤1 spawn per tick) ---
 const AutoSpawn = {
   enabled: false,
@@ -1409,7 +1498,7 @@ function disarmCooldown(){ AutoSpawn.cooldownSec = Infinity; }
 
 // routeMode can be 'arrival' | 'departure' | 'transit' | null
 function spawnWithParams({x_nm,y_nm,hdg,alt_ft,spd_kt, jitterDeg=0, routeMode=null, routeOverride=null}, fp=null){
-  const a = new Aircraft({ x_nm, y_nm, hdg, alt_ft, spd_kt, fp });
+  const a = new Aircraft({ x_nm, y_nm, hdg, alt_ft, spd_kt, fp, role: routeMode });
 
   if (jitterDeg) hdg = mod360(hdg + rand(-jitterDeg, +jitterDeg));
   a.setHeading(hdg);
@@ -1464,92 +1553,168 @@ if (!a.route.length){
   return a;
 }
 
-// Spawn ≤10 NM *outside* the first fix (i.e., farther from sector center),
-// and point the aircraft back to that fix.
-function spawnPointForTransitFirstFix(firstFixId){
+// Spawn just outside the sector bbox along the ray from (0,0) → firstFix,
+// then point the nose back to the first fix. Always ends up near the boundary,
+// not hundreds of miles away even if the fix itself is far.
+function spawnPointNearSectorTowardsFix(firstFixId){
   const fix = getWPById(firstFixId);
   if (!fix) return null;
 
-  // vector from sector center (0,0) to the fix
   const vx = fix.x_nm, vy = fix.y_nm;
+  const halfW = env.rectW/2, halfH = env.rectH/2;
   const len = Math.hypot(vx, vy) || 1;
-  const ux = vx / len, uy = vy / len;
+  const ux = vx/len, uy = vy/len;
+  const push = 6 + Math.random()*4;                  // 6–10 NM outside
+  const m = Math.max(6, Math.min(SPAWN.marginNM, 20));
 
-  // place 8–10 NM further *away* from the center along that ray
-  const dist = 8 + Math.random()*2; // 8..10 NM
-  const x = fix.x_nm + ux*dist;
-  const y = fix.y_nm + uy*dist;
+  const cand = [];
 
-  // heading back toward the fix
+  // Intersect ray with vertical bbox sides
+  if (vx !== 0){
+    const tx = (vx > 0 ?  halfW : -halfW) / vx;
+    const y  = vy * tx;
+    if (tx > 0 && Math.abs(y) <= halfH) cand.push({ t:tx, x:vx*tx, y });
+  }
+
+  // Intersect ray with horizontal bbox sides
+  if (vy !== 0){
+    const ty = (vy > 0 ?  halfH : -halfH) / vy;
+    const x  = vx * ty;
+    if (ty > 0 && Math.abs(x) <= halfW) cand.push({ t:ty, x, y:vy*ty });
+  }
+
+  if (!cand.length){
+    // Fallback: go to the corner on this bearing
+    const t = Math.min(halfW/Math.abs(vx||1e-6), halfH/Math.abs(vy||1e-6));
+    cand.push({ t, x:vx*t, y:vy*t });
+  }
+
+  cand.sort((a,b)=>a.t-b.t);
+  const edge = cand[0];
+
+  const x = edge.x + ux * (m + push);
+  const y = edge.y + uy * (m + push);
   const hdg = mod360(toDeg(Math.atan2(fix.x_nm - x, -(fix.y_nm - y))));
-
   return { x_nm:x, y_nm:y, hdg };
 }
+
 
 
 function spawnPlannedAircraft(){
   const halfW = env.rectW/2, halfH = env.rectH/2, m = SPAWN.marginNM;
 
-  // --- choose mode (weights) ---
-  const wTransit=0.80, wArrival=0.10, wDepart=0.10; // tweak to taste
+  // --- mode split (weights) ---
+  const wTransit=0.80, wArrival=0.10, wDepart=0.10;
   const r = Math.random();
-  let mode = 'transit';
-  if (r < wTransit) mode = 'transit';
-  else if (r < wTransit + wArrival) mode = 'arrival';
-  else mode = 'departure';
+  let mode = (r < wTransit) ? 'transit' : (r < wTransit + wArrival ? 'arrival' : 'departure');
 
-  // Choose alt/speed & SFP
+  // Common cruise & speed for non-departures
   const tMin = Math.floor(SPAWN.flMin/10);
   const tMax = Math.floor(SPAWN.flMax/10);
   const FL   = (tMin + randi(0, tMax - tMin))*10;
   const alt  = FL*100;
-  const spd  = 420 + Math.random()*70;
-  const fp   = makeSFP({ cruiseFL: FL, tasKt: Math.round(spd) });
+  const spd1 = 430 + Math.random()*70;
 
+  // ===== DEPARTURE: spawn AT APT, FL0, head to first fix =====
   if (mode === 'departure'){
-    // spawn near center pointing out
-    const ang = Math.random()*Math.PI*2;
-    const r   = rand(0, Math.min(halfW, halfH)*0.25);
-    const x   = Math.sin(ang)*r;
-    const y   = -Math.cos(ang)*r;
-    const hdg = mod360(toDeg(Math.atan2(x, -y)));
-    return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd, routeMode:'departure'}, fp);
+    const apt = pickDepartureAirport();
+    if (!apt){
+      console.warn("No known departure airports; falling back to transit.");
+      mode = 'transit';
+    } else {
+      const climbFL = DEPART_CLIMB_FL[apt.name] ?? 240;
+      const fp      = makeSFP({ dep: apt.name, cruiseFL: climbFL, tasKt: Math.round(spd1) });
+
+      // Build exact route from your templates; ensure it starts with the APT
+      let route = buildDepartureRoute(fp);
+      if (!route.length){
+        console.warn("No dep route built; falling back to transit.");
+        mode = 'transit';
+      } else {
+        if (route[0] !== apt.id) route.unshift(apt.id); // belt & suspenders
+        const nextFix = (route.length >= 2) ? getWPById(route[1]) : null;
+        const initHdg = nextFix ? bearingFromTo(apt.x_nm, apt.y_nm, nextFix.x_nm, nextFix.y_nm) : 0;
+
+        const a = spawnWithParams(
+          { x_nm: apt.x_nm, y_nm: apt.y_nm, hdg: initHdg, alt_ft: 0, spd_kt: 220,
+            routeMode:'departure', routeOverride: route },
+          fp
+        );
+        a.setAltitude(climbFL * 100);
+        updateSelectedPanel(); drawAll();
+        return a;
+      }
+    }
   }
 
-  // edge spawns share similar logic
+  // ===== ARRIVAL: spawn just outside bbox towards FIRST route fix =====
+if (mode === 'arrival'){
+  const fp  = makeSFP({ cruiseFL: FL, tasKt: Math.round(spd1) });
+  const rte = buildArrivalRoute(fp);
+
+  if (Array.isArray(rte) && rte.length){
+    const p = spawnPointNearSectorTowardsFix(rte[0]);
+    if (p){
+      return spawnWithParams(
+        { x_nm:p.x_nm, y_nm:p.y_nm, hdg:p.hdg, alt_ft:alt, spd_kt:spd1,
+          routeMode:'arrival', routeOverride:rte },
+        fp
+      );
+    }
+  }
+
+  // Fallback — legacy random edge if no route / couldn't place near first fix
   const side = randi(0,3);
   let x=0,y=0,baseHdg=0;
   if (side===0){ y=-(halfH+m); x=rand(-halfW*0.9, halfW*0.9); baseHdg=180; }
   else if(side===1){ x=(halfW+m); y=rand(-halfH*0.9, halfH*0.9); baseHdg=270; }
   else if(side===2){ y=(halfH+m); x=rand(-halfW*0.9, halfW*0.9); baseHdg=0; }
   else { x=-(halfW+m); y=rand(-halfH*0.9, halfH*0.9); baseHdg=90; }
-
-  // small jitter to avoid perfect lines
   const hdg = mod360(baseHdg + rand(-SPAWN.jitterDeg, SPAWN.jitterDeg));
+  return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd1, routeMode:'arrival'}, fp);
+}
 
-  if (mode === 'arrival'){
-    // treat as arrival route (could still avoid CTR per your ROUTE_CFG)
-    return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd, routeMode:'arrival'}, fp);
-  } else {
-    // TRANSIT: build route first so we can spawn near its first fix
+
+  // ===== TRANSIT: start just outside bbox towards first fix =====
+  {
+    const fp    = makeSFP({ cruiseFL: FL, tasKt: Math.round(spd1) });
     const route = buildTransitRoute(fp);
-    if (route && route.length){
-      const anchor = spawnPointForTransitFirstFix(route[0]);
-      if (anchor){
-        return spawnWithParams(
-          {
-            x_nm:anchor.x_nm, y_nm:anchor.y_nm, hdg:anchor.hdg,
-            alt_ft:alt, spd_kt:spd,
-            routeMode:'transit', routeOverride:route, jitterDeg:5
-          },
-          fp
-        );
-      }
+
+    if (!route.length){
+      // Fallback to legacy edge spawn if somehow no route available
+      const side = randi(0,3);
+      let x=0,y=0,baseHdg=0;
+      if (side===0){ y=-(halfH+m); x=rand(-halfW*0.9, halfW*0.9); baseHdg=180; }
+      else if(side===1){ x=(halfW+m); y=rand(-halfH*0.9, halfH*0.9); baseHdg=270; }
+      else if(side===2){ y=(halfH+m); x=rand(-halfW*0.9, halfW*0.9); baseHdg=0; }
+      else { x=-(halfW+m); y=rand(-halfH*0.9, halfH*0.9); baseHdg=90; }
+      const hdg = mod360(baseHdg + rand(-SPAWN.jitterDeg, SPAWN.jitterDeg));
+      return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd1, routeMode:'transit'}, fp);
     }
-    // Fallback: generic edge spawn if anything failed
-    return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd, routeMode:'transit'}, fp);
+
+    const p = spawnPointNearSectorTowardsFix(route[0]);
+    if (!p){
+      console.warn("Could not place near first fix; using legacy edge spawn.");
+      const side = randi(0,3);
+      let x=0,y=0,baseHdg=0;
+      if (side===0){ y=-(halfH+m); x=rand(-halfW*0.9, halfW*0.9); baseHdg=180; }
+      else if(side===1){ x=(halfW+m); y=rand(-halfH*0.9, halfH*0.9); baseHdg=270; }
+      else if(side===2){ y=(halfH+m); x=rand(-halfW*0.9, halfW*0.9); baseHdg=0; }
+      else { x=-(halfW+m); y=rand(-halfH*0.9, halfH*0.9); baseHdg=90; }
+      const hdg = mod360(baseHdg + rand(-SPAWN.jitterDeg, SPAWN.jitterDeg));
+      return spawnWithParams({x_nm:x,y_nm:y,hdg,alt_ft:alt,spd_kt:spd1, routeMode:'transit'}, fp);
+    }
+
+    // Perfect: spawn just outside bbox, fly to first fix, and use the exact route
+    return spawnWithParams(
+      { x_nm:p.x_nm, y_nm:p.y_nm, hdg:p.hdg, alt_ft:alt, spd_kt:spd1,
+        routeMode:'transit', routeOverride: route },
+      fp
+    );
   }
 }
+
+
 
 
 // Spawn a conflict pack (pair or triple) that will converge near center
@@ -2208,24 +2373,28 @@ function stepOnce(){
 
   // move all aircraft
   for(const a of state.ac) a.update(dt, env);
-  // Mark seen-once and cull only after they actually appeared
+  // Seen-once bookkeeping (viewport-based)
 for (const a of state.ac) {
   if (acInScopeNm(a, 0)) a.seenOnScreenOnce = true;
 }
 
-const TTL_NEVER_SEEN_SEC = 280; // safety: if something never appears in 3 min, drop it
+const now = simNowSec;
 state.ac = state.ac.filter(a => {
-  if (!a.seenOnScreenOnce) {
-    // Keep until it appears, unless TTL expires (or it has already entered)
-    return (simNowSec - a.spawnSec) < TTL_NEVER_SEEN_SEC || acInScopeNm(a, 0);
-  }
-  // Once seen at least once, despawn after it leaves the scope by 8 NM
-  return acInScopeNm(a, 8);
+  // Primary rules
+  if (a.finishedAtSec != null && (now - a.finishedAtSec) >= DESPAWN_AFTER_LASTFIX_SEC) return false;
+  if (a.role === 'arrival' && a.alt_ft <= DESPAWN_FL0_FT) return false;
+
+  // Safety: if truly never seen, give them a long leash
+  if (!a.seenOnScreenOnce) return (now - a.spawnSec) < NEVER_SEEN_MAX_SEC;
+
+  return true;
 });
 
-if (state.selectedId && !state.ac.some(a => a.id === state.selectedId)) {
+// Clear selection if culled
+if (state.selectedId && !state.ac.some(x => x.id === state.selectedId)) {
   state.selectedId = null;
 }
+
 
 
 // auto-spawn (cooldown)
@@ -2375,7 +2544,7 @@ if(openWin){
     document.getElementById('vs').value = a.vs_fpm ? (Math.abs(a.vs_fpm)|0) : "";
   }
 
-  document.getElementById('spawn').addEventListener('click', spawnAircraft);
+  document.getElementById('spawn').addEventListener('click', spawnPlannedAircraft);
   document.getElementById('autoSpawnToggle').addEventListener('change', e=>{
   AutoSpawn.enabled = e.target.checked;
   if (AutoSpawn.enabled){
@@ -2530,8 +2699,8 @@ window.addEventListener('load', () => {
   // NEW: sync the actual range to the selected option (160 by default)
   rangeNM = parseInt(document.getElementById('rangeSel').value, 9) || 120;
 
-  spawnAircraft();
-  spawnAircraft();
+  spawnPlannedAircraft();
+  spawnPlannedAircraft();
   booted = true;
   drawAll();
 });
