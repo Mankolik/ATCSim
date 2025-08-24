@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>ATC Radar Trainer — v8</title>
+<title>ATC Radar Trainer — v8.1</title>
 <style>
   :root{
   /* Near-black scope */
@@ -177,7 +177,7 @@ body.label-lg .tag .l2{ font-size:14px }
 </head>
 <body>
 <header>
-  <h1>ATC Radar Trainer — v8</h1>
+  <h1>ATC Radar Trainer — v8.1</h1>
   <div class="controls">
     <button id="spawn">Spawn traffic</button>
     <label class="small">
@@ -2236,8 +2236,8 @@ if (!a.route.length){
 }
 
 
-  state.selectedId = a.id;
-  flashSelected(); updateSelectedPanel(); drawAll();
+  
+  drawAll();
   return a;
 }
 
@@ -2329,7 +2329,7 @@ function spawnPlannedAircraft(){
           fp
         );
         a.setAltitude(climbFL * 100);
-        updateSelectedPanel(); drawAll();
+        drawAll();
         return a;
       }
     }
@@ -2503,9 +2503,6 @@ function spawnConflictPack(useRoutes=false){
   a.inSector = env.inRect(a.x_nm, a.y_nm);
 
   state.ac.push(a);
-  state.selectedId = a.id;
-  flashSelected();
-  updateSelectedPanel();
   drawAll();
 }
 
