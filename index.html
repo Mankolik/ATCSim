@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>ATC Radar Trainer — v7</title>
+<title>ATC Radar Trainer — v8</title>
 <style>
   :root{
   /* Near-black scope */
@@ -88,6 +88,12 @@ body.label-lg .tag .l2{ font-size:14px }
   padding:0 2px;
 }
 
+/* Hide ops row until hover or when selected/editing/picker open */
+.tag .ops { display: none; }
+.tag:hover .ops,
+.tag.is-selected .ops,
+.tag.show-ops .ops { display: block; }
+
 
 /* tiny inline button to mark handoff (optional) */
 .tag .ho{
@@ -138,11 +144,40 @@ body.label-lg .tag .l2{ font-size:14px }
 .sfpWin td.key{ color:#9fb3c1; width:88px }
 .sfpWin .route{ margin-top:8px; font-size:12px; color:#9ad6ff; line-height:1.35 }
 
+/* --- FL picker popover ----------------------------------------------- */
+.levelPicker{
+  position:absolute; z-index:50;
+  background:#0b1620; border:1px solid #1b3a4f; border-radius:8px;
+  box-shadow:0 10px 24px rgba(0,0,0,.45);
+  max-height:260px; width:140px; overflow:auto; padding:0;
+}
+.levelPicker .hdr{
+  position:sticky; top:0; background:#0b1620;
+  padding:8px; border-bottom:1px solid #173243;
+}
+.levelPicker .hdr input{
+  width:100%; padding:6px 8px;
+  background:#0d1a22; border:1px solid #274b64; border-radius:6px;
+  color:#e8eef2; font:12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  outline:none;
+}
+.levelPicker .item{
+  font:12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color:#cfe8f7; padding:6px 10px; cursor:pointer; white-space:nowrap;
+}
+.levelPicker .item:hover, .levelPicker .item[aria-selected="true"]{
+  background:#0d2230; color:#8fd3ff;
+}
+.levelPicker .tip{
+  padding:6px 10px; color:#9fb3c1; font-size:11px; border-top:1px solid #173243;
+}
+
+
 </style>
 </head>
 <body>
 <header>
-  <h1>ATC Radar Trainer — v7</h1>
+  <h1>ATC Radar Trainer — v8</h1>
   <div class="controls">
     <button id="spawn">Spawn traffic</button>
     <label class="small">
@@ -804,6 +839,8 @@ cx = W/2 + CENTER_SHIFT.x;
 cy = H/2 + CENTER_SHIFT.y;
 
   if (booted) drawAll(); // only redraw after full boot
+  repositionLevelPicker();
+
 }
 window.addEventListener('resize', resize);
 
@@ -862,6 +899,452 @@ const SECTOR_POLY = [
 // Vertical sector limits (feet)
 const SECTOR_FLOOR_FT =  9500;   // FL95
 const SECTOR_CEILING_FT = 66000; // FL660
+
+// === Level picker (CFL/XFL) ===============================================
+const FL_MAX_SELECT = Math.round(SECTOR_CEILING_FT/100);         // e.g. 660
+const FL_OPTIONS = Array.from({length: Math.floor(FL_MAX_SELECT/10)+1}, (_,i)=> i*10);
+
+function closeLevelPicker(){
+  const inst = window._levelPicker;
+  if (inst?.el && inst.el.parentNode) inst.el.parentNode.removeChild(inst.el);
+  if (inst?.meta?.trackId){
+    const t = tagMap.get(inst.meta.trackId);
+    if (t) t.classList.remove('show-ops');
+  }
+  window._levelPicker = null;
+}
+
+
+function openLevelPicker(anchorEl, currentFL, onSelect){
+  closeLevelPicker(); // single-instance
+
+  const picker = document.createElement('div');
+  picker.className = 'levelPicker';
+  picker.id = 'levelPicker';
+
+  const hdr = document.createElement('div');
+  hdr.className = 'hdr';
+  hdr.innerHTML = `<input id="lpInput" type="text" inputmode="numeric" placeholder="FL e.g. 220">`;
+  picker.appendChild(hdr);
+  const input = hdr.querySelector('#lpInput');
+  if (Number.isFinite(currentFL)) input.value = String(currentFL);
+
+  input.addEventListener('keydown', (ev)=>{
+    if (ev.key === 'Enter'){
+      const n = parseInt(String(input.value).toUpperCase().replace(/[^\d]/g,''), 10);
+      if (Number.isFinite(n)){
+        const fl = clamp(n, 0, FL_MAX_SELECT);
+        onSelect(fl);
+        closeLevelPicker();
+      }
+    } else if (ev.key === 'Escape'){
+      closeLevelPicker();
+    }
+  });
+
+  for (const fl of FL_OPTIONS){
+    const it = document.createElement('div');
+    it.className = 'item';
+    it.dataset.fl = String(fl);
+    it.textContent = 'FL' + String(fl).padStart(3,'0');
+    if (fl === currentFL) it.setAttribute('aria-selected','true');
+    it.addEventListener('click', (ev)=>{
+      ev.stopPropagation(); ev.preventDefault();
+      onSelect(fl);
+      closeLevelPicker();
+    });
+    picker.appendChild(it);
+  }
+
+  const tip = document.createElement('div');
+  tip.className = 'tip';
+  tip.textContent = 'Type a level + Enter, or pick.';
+  picker.appendChild(tip);
+
+  // attach + remember anchor (track + field) so we can re-position later
+  wrap.appendChild(picker);
+  const tagEl = anchorEl.closest('.tag');
+  const trackId = tagEl ? parseInt(tagEl.dataset.trackId, 10) : null;
+  const field = anchorEl.getAttribute('data-act') || null;
+  if (tagEl) tagEl.classList.add('show-ops');
+  window._levelPicker = { el: picker, meta: { trackId, field } };
+
+  // initial position
+  repositionLevelPicker();
+
+  // center current selection
+  const cur = picker.querySelector(`.item[data-fl="${currentFL}"]`);
+  if (cur) cur.scrollIntoView({block:'center'});
+
+  // outside click / Esc closes
+  const onDocDown = (ev)=>{ if (!picker.contains(ev.target)) closeLevelPicker(); };
+  const onKey = (ev)=>{ if (ev.key === 'Escape') closeLevelPicker(); };
+  document.addEventListener('pointerdown', onDocDown, {capture:true, once:true});
+  document.addEventListener('keydown', onKey, {once:true});
+
+  input.focus(); input.select();
+}
+
+function openWptPicker(anchorEl, ac){
+  closeLevelPicker?.(); // single instance (reuse your level picker closer)
+
+  const picker = document.createElement('div');
+  picker.className = 'levelPicker';      // reuse same CSS
+  picker.id = 'wptPicker';
+
+  // Header with input filter
+  const hdr = document.createElement('div');
+  hdr.className = 'hdr';
+  hdr.innerHTML = `<input id="wpInput" type="text" placeholder="Type to filter…">`;
+  picker.appendChild(hdr);
+  const input = hdr.querySelector('#wpInput');
+
+  // List all remaining fixes in FPL
+  const items = routeRemainingFixes(ac);
+  if (!items.length){
+    const empty = document.createElement('div');
+    empty.className = 'item';
+    empty.textContent = '— No remaining fixes —';
+    empty.style.opacity = 0.6;
+    picker.appendChild(empty);
+  } else {
+    for (const it of items){
+      const row = document.createElement('div');
+      row.className = 'item';
+      row.dataset.id = String(it.id);
+      row.textContent = it.name;
+      row.addEventListener('click', (ev)=>{
+        ev.stopPropagation(); ev.preventDefault();
+        if (shortcutToFix(ac, it.id)){
+          updateSelectedPanel(); drawAll();
+        }
+        closeLevelPicker?.();
+      });
+      picker.appendChild(row);
+    }
+  }
+
+  // Tiny hint footer
+  const tip = document.createElement('div');
+  tip.className = 'tip';
+  tip.textContent = 'Scroll or type to filter. Enter = first match.';
+  picker.appendChild(tip);
+
+  // Attach + remember where to stick it during relayouts
+  wrap.appendChild(picker);
+  const tagEl   = anchorEl.closest('.tag');
+  const trackId = tagEl ? parseInt(tagEl.dataset.trackId, 10) : null;
+  const field   = anchorEl.getAttribute('data-act') || 'wpt';
+  if (tagEl) tagEl.classList.add('show-ops');
+  window._levelPicker = { el: picker, meta: { trackId, field } };
+
+  // Initial position + keep glued on refresh/drag/resize
+  repositionLevelPicker?.();
+
+  // Filter-as-you-type (only among items shown)
+  function applyFilter(){
+    const q = input.value.trim().toUpperCase();
+    const all = picker.querySelectorAll('.item[data-id]');
+    let firstVisible = null;
+    all.forEach(row=>{
+      const name = row.textContent.toUpperCase();
+      const show = !q || name.includes(q);
+      row.style.display = show ? '' : 'none';
+      if (show && !firstVisible) firstVisible = row;
+    });
+    return firstVisible;
+  }
+
+  input.addEventListener('input', applyFilter);
+
+  input.addEventListener('keydown', (ev)=>{
+    if (ev.key === 'Enter'){
+      const first = applyFilter();
+      if (first){
+        first.click(); // selects the first visible (still within FPL)
+      }
+    } else if (ev.key === 'Escape'){
+      closeLevelPicker?.();
+    }
+  });
+
+  // Close on outside click
+  const onDocDown = (ev)=>{ if (!picker.contains(ev.target)) closeLevelPicker?.(); };
+  const onKey = (ev)=>{ if (ev.key === 'Escape') closeLevelPicker?.(); };
+  document.addEventListener('pointerdown', onDocDown, {capture:true, once:true});
+  document.addEventListener('keydown', onKey, {once:true});
+
+  input.focus(); input.select();
+}
+
+function openHeadingPicker(anchorEl, ac){
+  closeLevelPicker?.();
+
+  const picker = document.createElement('div');
+  picker.className = 'levelPicker';
+  picker.id = 'hdgPicker';
+
+  const hdr = document.createElement('div');
+  hdr.className = 'hdr';
+  hdr.innerHTML = `<input id="hdgInput" type="text" inputmode="numeric" placeholder="HDG (1–360)">`;
+  picker.appendChild(hdr);
+  const input = hdr.querySelector('#hdgInput');
+  input.value = String(Math.round(mod360(ac.tgtHdg)) || 360).padStart(3,'0');
+
+  const cur = Math.round(mod360(ac.tgtHdg));
+
+  function addRow(hShown){
+    // We store 0 for 360 internally.
+    const hApply = (hShown === 360 ? 0 : hShown);
+    const row = document.createElement('div');
+    row.className = 'item';
+    row.textContent = 'HDG ' + String(hShown).padStart(3,'0');
+    if ((cur === 0 && hShown === 360) || cur === hShown) {
+      row.setAttribute('aria-selected','true');
+    }
+    row.addEventListener('click', (ev)=>{
+      ev.stopPropagation(); ev.preventDefault();
+      ac.setHeading(hApply);
+      state.selectedId = ac.id;
+      updateSelectedPanel(); drawAll();
+      closeLevelPicker?.();
+    });
+    picker.appendChild(row);
+  }
+
+  // 005…355, 360 (→ 0)
+  for (let h=5; h<=355; h+=5) addRow(h);
+  addRow(360);
+
+  const tip = document.createElement('div');
+  tip.className = 'tip';
+  tip.textContent = 'Type a heading and press Enter. 360 = 000.';
+  picker.appendChild(tip);
+
+  wrap.appendChild(picker);
+  const tagEl   = anchorEl.closest('.tag');
+  const trackId = tagEl ? parseInt(tagEl.dataset.trackId,10) : null;
+  if (tagEl) tagEl.classList.add('show-ops');
+  window._levelPicker = { el: picker, meta: { trackId, field: 'hdg' } };
+  repositionLevelPicker?.();
+
+  input.addEventListener('keydown', (ev)=>{
+    if (ev.key === 'Enter'){
+      let n = parseInt(String(input.value).replace(/[^\d]/g,''),10);
+      if (Number.isFinite(n)){
+        n = mod360(n);
+        ac.setHeading(n===0?0:n);
+        state.selectedId = ac.id;
+        updateSelectedPanel(); drawAll();
+        closeLevelPicker?.();
+      }
+    } else if (ev.key === 'Escape'){
+      closeLevelPicker?.();
+    }
+  });
+
+  const onDocDown = (ev)=>{ if (!picker.contains(ev.target)) closeLevelPicker?.(); };
+  const onKey     = (ev)=>{ if (ev.key==='Escape') closeLevelPicker?.(); };
+  document.addEventListener('pointerdown', onDocDown, {capture:true, once:true});
+  document.addEventListener('keydown', onKey, {once:true});
+
+  input.focus(); input.select();
+}
+
+function openMachPicker(anchorEl, ac){
+  closeLevelPicker?.();
+
+  const picker = document.createElement('div');
+  picker.className = 'levelPicker';
+  picker.id = 'machPicker';
+
+  const hdr = document.createElement('div');
+  hdr.className = 'hdr';
+  hdr.innerHTML = `<input id="machInput" type="text" inputmode="decimal" placeholder="Mach (e.g. 0.78)">`;
+  picker.appendChild(hdr);
+  const input = hdr.querySelector('#machInput');
+  const curM  = (ac.tgtSpeedMode==='MACH' && ac.tgtMach) ? ac.tgtMach : ac.mach;
+  input.value = curM.toFixed(2);
+
+  function addRow(m){
+    const row = document.createElement('div');
+    row.className = 'item';
+    row.textContent = 'M ' + m.toFixed(2);
+    if (Math.abs(curM - m) < 0.005) row.setAttribute('aria-selected','true');
+    row.addEventListener('click', (ev)=>{
+      ev.stopPropagation(); ev.preventDefault();
+      ac.setMach(m);
+      state.selectedId = ac.id;
+      updateSelectedPanel(); drawAll();
+      closeLevelPicker?.();
+    });
+    picker.appendChild(row);
+  }
+
+  // Practical cruise range
+  for (let m=0.60; m<=0.90+1e-9; m+=0.01) addRow(Number(m.toFixed(2)));
+
+  const tip = document.createElement('div');
+  tip.className = 'tip';
+  tip.textContent = 'Type any Mach 0.30–0.99 and press Enter.';
+  picker.appendChild(tip);
+
+  wrap.appendChild(picker);
+  const tagEl   = anchorEl.closest('.tag');
+  const trackId = tagEl ? parseInt(tagEl.dataset.trackId,10) : null;
+  if (tagEl) tagEl.classList.add('show-ops');
+  window._levelPicker = { el: picker, meta: { trackId, field: 'mach' } };
+  repositionLevelPicker?.();
+
+  input.addEventListener('keydown', (ev)=>{
+    if (ev.key === 'Enter'){
+      let m = parseFloat(String(input.value).replace(/[^0-9.]/g,''));
+      if (Number.isFinite(m)){
+        m = clamp(m, 0.30, 0.99);
+        ac.setMach(m);
+        state.selectedId = ac.id;
+        updateSelectedPanel(); drawAll();
+        closeLevelPicker?.();
+      }
+    } else if (ev.key === 'Escape'){
+      closeLevelPicker?.();
+    }
+  });
+
+  const onDocDown = (ev)=>{ if (!picker.contains(ev.target)) closeLevelPicker?.(); };
+  const onKey     = (ev)=>{ if (ev.key==='Escape') closeLevelPicker?.(); };
+  document.addEventListener('pointerdown', onDocDown, {capture:true, once:true});
+  document.addEventListener('keydown', onKey, {once:true});
+
+  input.focus(); input.select();
+}
+
+function openVsPicker(anchorEl, ac){
+  closeLevelPicker?.();
+
+  const picker = document.createElement('div');
+  picker.className = 'levelPicker';
+  picker.id = 'vsPicker';
+
+  const hdr = document.createElement('div');
+  hdr.className = 'hdr';
+  hdr.innerHTML = `<input id="vsInput" type="text" inputmode="numeric" placeholder="VS ×100 (e.g. +18)">`;
+  picker.appendChild(hdr);
+  const input = hdr.querySelector('#vsInput');
+  const curH  = Math.round(ac.vs_fpm/100);
+  input.value = (curH>=0?'+':'') + String(curH);
+
+  function addRow(h){
+    const row = document.createElement('div');
+    row.className = 'item';
+    const fpm = h*100;
+    const sign = h>0?'+':(h<0?'-':'');
+    row.textContent = `VS ${sign}${Math.abs(h)}  (${fpm} fpm)`;
+    if (h === curH) row.setAttribute('aria-selected','true');
+    row.addEventListener('click', (ev)=>{
+      ev.stopPropagation(); ev.preventDefault();
+      // change VS but keep current target altitude
+      ac.setAltitude(ac.tgtAlt, fpm);
+      state.selectedId = ac.id;
+      updateSelectedPanel(); drawAll();
+      closeLevelPicker?.();
+    });
+    picker.appendChild(row);
+  }
+
+  // −50…+50 in steps of 5 (±500 fpm), include 0
+  for (let h=-50; h<=50; h+=5) addRow(h);
+
+  const tip = document.createElement('div');
+  tip.className = 'tip';
+  tip.textContent = 'Type ±hundreds (e.g. -20, +25) then Enter.';
+  picker.appendChild(tip);
+
+  wrap.appendChild(picker);
+  const tagEl   = anchorEl.closest('.tag');
+  const trackId = tagEl ? parseInt(tagEl.dataset.trackId,10) : null;
+  if (tagEl) tagEl.classList.add('show-ops');
+  window._levelPicker = { el: picker, meta: { trackId, field: 'vs' } };
+  repositionLevelPicker?.();
+
+  input.addEventListener('keydown', (ev)=>{
+    if (ev.key === 'Enter'){
+      const raw = String(input.value).trim().replace(/[^\d+\-]/g,'');
+      const h = parseInt(raw, 10);
+      if (Number.isFinite(h)){
+        const hh = clamp(h, -99, 99); // safety clamp, UI shows ±50
+        ac.setAltitude(ac.tgtAlt, hh*100);
+        state.selectedId = ac.id;
+        updateSelectedPanel(); drawAll();
+        closeLevelPicker?.();
+      }
+    } else if (ev.key === 'Escape'){
+      closeLevelPicker?.();
+    }
+  });
+
+  const onDocDown = (ev)=>{ if (!picker.contains(ev.target)) closeLevelPicker?.(); };
+  const onKey     = (ev)=>{ if (ev.key==='Escape') closeLevelPicker?.(); };
+  document.addEventListener('pointerdown', onDocDown, {capture:true, once:true});
+  document.addEventListener('keydown', onKey, {once:true});
+
+  input.focus(); input.select();
+}
+
+
+function repositionLevelPicker(){
+  const lp = window._levelPicker?.el;
+  const meta = window._levelPicker?.meta;
+  if (!lp || !meta) return;
+
+  // find the current anchor span inside the *current* tag node
+  const tag = tagMap.get(meta.trackId);
+  if (!tag) return; // a/c despawned? leave picker where it is
+  const anchor = tag.querySelector(`[data-act="${meta.field}"]`);
+  if (!anchor) return;
+
+  const wrapRect = wrap.getBoundingClientRect();
+  const r = anchor.getBoundingClientRect();
+  lp.style.left = (r.left - wrapRect.left) + 'px';
+  lp.style.top  = (r.bottom - wrapRect.top + 6) + 'px';
+}
+
+// Return [{id, name}] for the remaining FPL fixes from current routeIdx onward
+function routeRemainingFixes(ac){
+  const from = Math.max(0, ac.routeIdx|0);
+  const ids = Array.isArray(ac.route) ? ac.route.slice(from) : [];
+  const out = [];
+  for (const id of ids){
+    const w = env.getWaypoint(id);
+    if (w) out.push({ id: w.id, name: w.name });
+  }
+  return out;
+}
+
+// Move lateral nav to a later fix *within the same FPL* (no DIRECT).
+// This trims the "past legs" logically by advancing routeIdx, so the green
+// preview starts at the chosen fix right away.
+function shortcutToFix(ac, fixId){
+  const idx = Array.isArray(ac.route) ? ac.route.indexOf(fixId) : -1;
+  if (idx < 0) return false;         // not in FPL → reject
+
+  ac.navMode = 'ROUTE';
+  ac.directWptId = null;
+  ac.routeIdx = idx;
+
+  // reset pass-trend helpers so range-to-target logic is fresh
+  ac.prevDistToTarget = null;
+  ac.lastNavTargetId  = null;
+
+  // (optional) snap the target heading immediately
+  const w = env.getWaypoint(fixId);
+  if (w){
+    const hdgTo = mod360(Math.atan2(w.x_nm - ac.x_nm, -(w.y_nm - ac.y_nm)) * 180/Math.PI);
+    ac.tgtHdg = hdgTo;
+  }
+  return true;
+}
+
 
 
 // ===== TMAs (floor/ceiling in feet) =========================================
@@ -2127,6 +2610,8 @@ function spawnConflictPack(useRoutes=false){
   tag.style.left = (cx+nmToPx(aObj.x_nm) + aObj.labelDx) + 'px';
   tag.style.top  = (cy+nmToPx(aObj.y_nm) + aObj.labelDy) + 'px';
   drawCanvasOnly();
+  repositionLevelPicker();
+
 });
 
         tag.addEventListener('pointerup', ev=>{
@@ -2171,6 +2656,8 @@ tag.addEventListener('mousedown', (ev)=>{
 const st = getTrackState(a);   // uses helpers from step 2.3
 tag.classList.remove('st-controlled','st-inbound','st-intruder','st-outbound');
 tag.classList.add('st-'+st);
+tag.classList.toggle('is-selected', a.id === state.selectedId);
+
 
 // build 4 text lines (no box, no table)
 const curFL = fmtFLshort(a.alt_ft);
@@ -2183,9 +2670,11 @@ tag.innerHTML = `
   <div class="l1"><span data-cs>${a.cs}</span><span class="ho" data-ho="1" title="Toggle H/O">H/O</span></div>
   <div class="l2"><span data-act="curfl">${curFL}</span>&nbsp;&nbsp;&nbsp;<span data-act="cfl">${cfl}</span>&nbsp;&nbsp;<span data-act="xfl">${fmtXFL(a.xfl_ft)}</span></div>
   <div class="l2"><span data-act="type">${type}</span>&nbsp;&nbsp;&nbsp;<span data-act="wpt">${wpt}</span></div>
-  <div class="l2">H<span data-act="hdg">${formatHeading(a.hdg)}</span>&nbsp;&nbsp;&nbsp;S<span data-act="spd">${a.spd_kt|0}</span>/M<span data-act="mach">${a.mach.toFixed(2)}</span>&nbsp;&nbsp;VS<span data-act="vs">${vs100}</span></div>
+  <div class="l2 ops">H<span data-act="hdg">${formatHeading(a.hdg)}</span>&nbsp;&nbsp;&nbsp;S<span data-act="spd">${a.spd_kt|0}</span>/M<span data-act="mach">${a.mach.toFixed(2)}</span>&nbsp;&nbsp;VS<span data-act="vs">${vs100}</span></div>
 `;
 
+
+repositionLevelPicker();
 
 
 // wire the tiny H/O toggle (marks a.hoMarked to drive "intruder" color)
@@ -2214,6 +2703,7 @@ if (state.editing && state.editing.id === a.id){
   const hi = act(state.editing.field);
   if (hi) hi.classList.add('editing');
 }
+tag.classList.toggle('show-ops', !!(state.editing && state.editing.id === a.id));
 
 // prevent autoscroll on middle mouse and stop it bubbling into drag
 function blockMMB(el){
@@ -2238,10 +2728,8 @@ function withMMB(el, fn){
 // H
 const hdgEl = act('hdg'); blockMMB(hdgEl);
 withMMB(hdgEl, ()=>{
-  state.selectedId=a.id; updateSelectedPanel();
-  const inp = document.getElementById('hdg');
-  setEditing('hdg');
-  inp.focus(); inp.select();
+  state.selectedId = a.id; updateSelectedPanel();
+  openHeadingPicker(hdgEl, a);
 });
 
 // S (kt)
@@ -2256,65 +2744,53 @@ withMMB(spdEl, ()=>{
 // M
 const machEl = act('mach'); blockMMB(machEl);
 withMMB(machEl, ()=>{
-  state.selectedId=a.id; updateSelectedPanel();
-  const inp = document.getElementById('mach');
-  setEditing('mach');
-  inp.focus(); inp.select();
+  state.selectedId = a.id; updateSelectedPanel();
+  openMachPicker(machEl, a);
 });
 
-// VS (×100)
 const vsEl = act('vs'); blockMMB(vsEl);
 withMMB(vsEl, ()=>{
-  state.selectedId=a.id; updateSelectedPanel();
-  const inp = document.getElementById('vs');
-  inp.value = Math.round(Math.abs(a.vs_fpm)/100);
-  setEditing('vs');
-  inp.focus(); inp.select();
+  state.selectedId = a.id; updateSelectedPanel();
+  openVsPicker(vsEl, a);
 });
 
-// block MMB autoscroll on CFL and quick-edit via MMB
+// CFL: MMB opens scrollable level picker
 const cflEl = act('cfl');
-if (cflEl){
-  cflEl.addEventListener('mousedown', ev=>{ if (ev.button===1){ ev.preventDefault(); ev.stopPropagation(); }});
-  cflEl.addEventListener('auxclick', ev=>{
-    if (ev.button!==1 || ev.shiftKey) return;
-    state.selectedId=a.id; updateSelectedPanel();
-    const inp = document.getElementById('alt'); // reuse Alt box
-    setEditing('cfl'); inp.focus(); inp.select();
-    ev.preventDefault(); ev.stopPropagation();
+blockMMB(cflEl);
+withMMB(cflEl, ()=>{
+  const curFL = Math.round(a.tgtAlt/100);
+  openLevelPicker(cflEl, curFL, (flSel)=>{
+    a.setAltitude(flSel*100, null);       // keeps your ≥FL250 climb cap
+    state.selectedId = a.id;
+    updateSelectedPanel(); drawAll();
   });
-}
+});
 
-// XFL MMB => prompt & set
+
+// XFL: MMB opens scrollable level picker
 const xflEl = act('xfl');
-if (xflEl){
-  xflEl.addEventListener('mousedown', ev=>{ if (ev.button===1){ ev.preventDefault(); ev.stopPropagation(); }});
-  xflEl.addEventListener('auxclick', ev=>{
-    if (ev.button!==1 || ev.shiftKey) return;
-    const cur = a.xfl_ft ? Math.round(a.xfl_ft/100) : "";
-    const v = prompt("Set XFL (Flight Level, e.g. 220):", cur);
-    if (v!=null && v.trim()!==""){
-      const n = parseInt(v.replace(/[^\d]/g,''),10);
-      if (Number.isFinite(n)) { a.xfl_ft = n*100; layoutTags(); drawCanvasOnly(); }
-    }
-    ev.preventDefault(); ev.stopPropagation();
+blockMMB(xflEl);
+withMMB(xflEl, ()=>{
+  const curFL = a.xfl_ft ? Math.round(a.xfl_ft/100) : 0;
+  openLevelPicker(xflEl, curFL, (flSel)=>{
+    a.xfl_ft = flSel*100;
+    layoutTags(); drawCanvasOnly();
   });
-}
+});
 
 
-// Waypoint direct-to via MMB prompt
+
+// WPT picker (MMB) — only remaining FPL fixes; selecting short-cuts the route
 const wptEl = act('wpt'); blockMMB(wptEl);
 withMMB(wptEl, ()=>{
-  const name = prompt("Direct-to waypoint (e.g. CTR, ENE, any dynamic name):", "");
-  if (!name) return;
-  const w = findFixByName(name);
-  if (w) { a.directTo(w.id); updateSelectedPanel(); drawAll(); }
-  else { alert("No waypoint with that name."); }
-  
-
-
-
+  const list = routeRemainingFixes(a);
+  if (!list.length){
+    alert("No remaining fixes in the flight plan.");
+    return;
+  }
+  openWptPicker(wptEl, a);
 });
+
 
 
 
