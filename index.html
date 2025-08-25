@@ -66,7 +66,27 @@
 .tag:hover,.tag.dragging{opacity:1}
 
 /* simple type ramp */
-.tag .l1{ font-weight:700; font-size:14px; line-height:1.05 }
+/* first line now flex so GS can sit on the far right */
+.tag .l1{
+  font-weight:700;
+  font-size:14px;
+  line-height:1.05;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  white-space:nowrap;       /* keep the top line on one line */
+}
+/* GS sits right after H/O, small gap, same color as label */
+.tag .l1 .gs{
+  margin-left:6px;                 /* <-- was margin-left:auto */
+  font-size:12px;
+  letter-spacing:.2px;
+  color:currentColor;              /* match the label’s state color */
+  opacity:.95;
+  font-variant-numeric:tabular-nums; /* no width wiggle when digits change */
+}
+
+
 .tag .l2{ font-size:12px; line-height:1.05; letter-spacing:.2px }
 /* label size presets */
 body.label-sm .tag .l1{ font-size:12px }
@@ -75,11 +95,13 @@ body.label-lg .tag .l1{ font-size:16px }
 body.label-lg .tag .l2{ font-size:14px }
 
 
-/* state-driven colors */
-.tag.st-controlled { color:#69ff8a; }     /* green */
-.tag.st-inbound    { color:#ffffff; }     /* white */
-.tag.st-intruder   { color:#ffd9b3; }     /* very light orange */
-.tag.st-outbound   { color:#9aa3aa; }     /* greyed out */
+
+/* state-driven colors (freeze value into --tagColor) */
+.tag.st-controlled { color:#69ff8a; --tagColor:#69ff8a; }  /* green */
+.tag.st-inbound    { color:#ffffff; --tagColor:#ffffff; }  /* white */
+.tag.st-intruder   { color:#ffd9b3; --tagColor:#ffd9b3; }  /* light orange */
+.tag.st-outbound   { color:#9aa3aa; --tagColor:#9aa3aa; }  /* greyed out */
+
 /* highlight the field currently being edited */
 .tag [data-act].editing{
   outline:1px dashed currentColor;
@@ -88,18 +110,60 @@ body.label-lg .tag .l2{ font-size:14px }
   padding:0 2px;
 }
 
-/* Hide ops row until hover or when selected/editing/picker open */
-.tag .ops { display: none; }
+/* Reserve space so labels don't jump on hover */
+.tag .ops{
+  display:block;            /* always in flow */
+  visibility:hidden;        /* hidden but taking space */
+  opacity:0;
+  transition: opacity .12s ease;
+  white-space:nowrap;       /* prevent wrapping (VS stays on one line) */
+}
 .tag:hover .ops,
 .tag.is-selected .ops,
-.tag.show-ops .ops { display: block; }
+.tag.show-ops .ops{
+  visibility:visible;
+  opacity:1;
+}
+
 
 
 /* tiny inline button to mark handoff (optional) */
 .tag .ho{
   display:inline-block; margin-left:8px; padding:1px 6px;
   font-size:10px; border:1px solid currentColor; border-radius:999px;
+  cursor:pointer;
 }
+
+
+/* keep your existing tiny pill styles */
+.tag .ho{ transition: transform .06s ease, background .12s ease; }
+.tag .ho:active{ transform: translateY(1px) scale(0.98); }
+
+/* keep H/O / XFER pill width stable */
+.tag .ho{ min-width:34px; text-align:center; }
+
+
+/* ADD THIS BLOCK DIRECTLY BELOW */
+.tag .ho[aria-pressed="true"]{
+  background: var(--tagColor);      /* captured from .tag’s currentColor */
+  border-color: var(--tagColor);
+  color: var(--bg);                  /* readable text */
+  box-shadow: 0 0 0 1px var(--bg);   /* thin outline so it never “vanishes” */
+}
+
+/* === Conflict badges above callsign === */
+.tag .badges{ margin-bottom:2px; }
+.tag .badge{
+  display:inline-block; padding:1px 6px; border-radius:999px;
+  font-size:10px; line-height:1; letter-spacing:.3px;
+  border:1px solid currentColor; opacity:0.95;
+}
+.tag .badge.warn  { color:#ffcc66; border-color:#ffcc66; }
+.tag .badge.alert { color:#ff6a6a; border-color:#ff6a6a; }
+
+
+
+
   .tag:hover,.tag.dragging{opacity:1}
   .tag .line1{font-weight:600}
   .tag .line2{font-size:12px; color:var(--muted)}
@@ -259,7 +323,7 @@ body.label-lg .tag .l2{ font-size:14px }
   <div class="section">
     <div class="row"><strong>Speed</strong></div>
     <div class="row">
-      <label for="spd">Speed (kt)</label>
+      <label for="spd">IAS (kt)</label>
       <input id="spd" type="number" step="5" min="60" placeholder="e.g. 250">
       <button id="btnSpd">Set kt</button>
     </div>
@@ -316,13 +380,6 @@ Esc = delete last ruler</div>
   </div>
 
   <div class="section">
-    <div class="row"><strong>Speed restrictions</strong></div>
-    <div class="row small">
-      <label><input id="spd250" type="checkbox" checked> 250 kt at/under 10,000 ft</label>
-    </div>
-  </div>
-
-  <div class="section">
     <div class="row"><strong>Waypoints & Direct-to</strong></div>
     <div class="row">
       <button id="addWpt">Add waypoint</button>
@@ -367,27 +424,79 @@ const FIX_PASS_TREND_NM = 2.0; // or, if we've been closer than this and range s
 function managedSpeedTargetKt(a){
   const alt = a.alt_ft;
 
-  // Climb/High-level schedule
-  let tgt = (alt <  5000) ? 220 :
-            (alt < 10000) ? 240 :
-            (alt < 24000) ? 300 :
-                            (a.fp?.tasKt || 450);
+  // Base schedule in IAS
+  let tgtIAS = (alt <  5000) ? 220 :
+               (alt < 10000) ? 240 :
+               (alt < 24000) ? 300 :
+               // High level: prefer planned TAS but convert to IAS at current ISA
+               tasToIas(a.fp?.tasKt || 450, alt);
 
-  // Descents and arrivals slow progressively
+  // Descents / arrivals: progressive slows (still IAS)
   if (a.vs_fpm < -200 || a.role === 'arrival'){
-    if (alt < 12000) tgt = Math.min(tgt, 280);
-    if (alt < 10000) tgt = Math.min(tgt, 240);
-    if (alt <  6000) tgt = Math.min(tgt, 220);
-    if (alt <  3000) tgt = Math.min(tgt, 200);
+    if (alt < 12000) tgtIAS = Math.min(tgtIAS, 280);
+    if (alt < 10000) tgtIAS = Math.min(tgtIAS, 240);
+    if (alt <  6000) tgtIAS = Math.min(tgtIAS, 220);
+    if (alt <  3000) tgtIAS = Math.min(tgtIAS, 200);
   }
-  return tgt;
+  return tgtIAS;
 }
+
 
   function isaSpeedOfSoundKts(alt_ft){
     const h = Math.max(0, Math.min(86000, alt_ft)) * 0.3048;
     let T; if(h<=11000) T=288.15-0.0065*h; else if(h<=20000) T=216.65; else T=216.65+0.001*(h-20000);
     const a_ms = Math.sqrt(1.4*287.05287*T); return a_ms*1.943844;
   }
+  
+  // === ISA state (pressure/temp/density) + IAS↔TAS ===
+function isaState(alt_ft){
+  const h = Math.max(0, Math.min(86000, alt_ft)) * 0.3048; // ft→m (cap 86 km)
+  const T0 = 288.15, p0 = 101325, g = 9.80665, R = 287.05287;
+
+  // Layer bases
+  const h11 = 11000, T11 = 216.65;
+  const L_tropo = -0.0065;   // K/m
+  const L_strat1 = +0.001;   // K/m (20–32 km)
+
+  if (h <= h11){
+    const T = T0 + L_tropo*h;
+    const theta = T / T0;
+    const delta = Math.pow(theta, -g/(L_tropo*R));
+    const sigma = delta / theta;
+    return { theta, delta, sigma };
+  }
+
+  // 11–20 km: isothermal at 216.65 K
+  const theta11 = T11 / T0;
+  const delta11 = Math.pow(theta11, -g/(L_tropo*R)); // carry-over from 0–11 km
+  if (h <= 20000){
+    const T = T11;
+    const theta = T / T0;
+    const delta = delta11 * Math.exp(-g*(h - h11)/(R*T));
+    const sigma = delta / theta;
+    return { theta, delta, sigma };
+  }
+
+  // 20–32 km: +0.001 K/m
+  const T20 = T11;
+  const delta20 = delta11 * Math.exp(-g*(20000 - h11)/(R*T11));
+  const T = T20 + L_strat1*(h - 20000);
+  const theta = T / T0;
+  const delta = delta20 * Math.pow(T / T20, -g/(L_strat1*R));
+  const sigma = delta / theta;
+  return { theta, delta, sigma };
+}
+
+function isaSigma(alt_ft){ return isaState(alt_ft).sigma; }
+function iasToTas(ias_kt, alt_ft){
+  const s = Math.max(1e-6, isaSigma(alt_ft));
+  return ias_kt / Math.sqrt(s);
+}
+function tasToIas(tas_kt, alt_ft){
+  const s = Math.max(1e-6, isaSigma(alt_ft));
+  return tas_kt * Math.sqrt(s);
+}
+
   function formatHeading(h){
     let n = Math.round(mod360(h));
     n = n===0 ? 360 : n;
@@ -420,6 +529,28 @@ function turnAngleDeg(ax, ay, bx, by){
   return Math.abs(ang * 180 / Math.PI);
 }
 
+// --- Lead-turn helpers (fly-by) ---
+function angleDiffDeg(a, b){
+  let d = mod360(a - b);
+  return d > 180 ? 360 - d : d;
+}
+function turnRadiusNmFor(ac){
+  // R = v/ω ; v in NM/s, ω in rad/s
+  const v_nms = ac.spd_kt * nmPerKtPerSec;
+  const omega = toRad(Math.max(0.1, ac.turnRateDps)); // deg/s -> rad/s
+  return v_nms / omega; // NM
+}
+function leadTurnDistanceNm(ac, curFix, nextFix){
+  if (!curFix || !nextFix) return 0;
+  const inbound  = bearingFromTo(ac.x_nm, ac.y_nm, curFix.x_nm, curFix.y_nm);
+  const outbound = bearingFromTo(curFix.x_nm, curFix.y_nm, nextFix.x_nm, nextFix.y_nm);
+  const delta = angleDiffDeg(outbound, inbound);
+  if (delta < 3) return 0;                 // essentially straight
+  const R = turnRadiusNmFor(ac);
+  const lead = R * Math.tan(toRad(delta/2));
+  return clamp(lead, 0.2, 12);             // keep it sane
+}
+
 
   function nextWptName(a, env){
   if(a.navMode==="DIRECT" && a.directWptId) return env.getWaypoint(a.directWptId)?.name || "—";
@@ -445,11 +576,14 @@ function fmtXFL(ft){
 
 function getTrackState(a){
   if (a.inSector){
-    return a.hoMarked ? "intruder" : "controlled";
+    // In our airspace: green if controlled; “intruder” color if already handed off
+    return a.handedOff ? "intruder" : "controlled";
   } else {
+    // Outside: inbound (never seen) vs outbound (has been ours)
     return a.everInRect ? "outbound" : "inbound";
   }
 }
+
 
   // --- Short Flight Plan (SFP) & helpers ---
 const DEP_PORTS = ["EPWA","EPMO","EPLL","EPWR","EPPO","EPKK","EPKT","LKPR"];
@@ -554,6 +688,8 @@ function resolveEndpoint(ep){
       this.hdg=opts.hdg??Math.floor(Math.random()*360);
       this.alt_ft=opts.alt_ft??(30000);
       this.spd_kt=opts.spd_kt??(this.alt_ft>24000?450:250);
+      // Canonical speed: keep IAS as the commanded/editable state
+      this.ias_kt = tasToIas(this.spd_kt, this.alt_ft); // derive IAS from initial TAS
       this.fp = opts.fp ?? null;   // Short Flight Plan (dep, dest, cruiseFL, tasKt, type)
       this.type = opts.type ?? pick(TYPES);   // <-- new: default a random type
       this.route = [];         // array of waypoint ids
@@ -572,7 +708,13 @@ function resolveEndpoint(ep){
       // Targets
       this.tgtHdg=this.hdg; this.tgtAlt=this.alt_ft;
       this.vs_fpm=0; this.defaultVS=2000;
-      this.tgtSpeedMode="KT"; this.tgtSpd_kt=this.spd_kt; this.tgtMach=null;
+
+    // Speed targets (IAS primary). 'KT' here = IAS.
+      this.tgtSpeedMode="KT";
+      this.tgtIAS_kt = this.ias_kt;
+      this.tgtSpd_kt = this.tgtIAS_kt; // legacy field for UI
+      this.tgtMach=null;
+
 
       // Dynamics
       this.turnRateDps=3; this.accel_ktps=1.0; this.maxVS_fps=4000*ftPerMinToFtPerSec;
@@ -594,11 +736,14 @@ this.seenOnScreenOnce = false;
 this.spawnSec = (typeof simNowSec !== 'undefined') ? simNowSec : 0;
 
 
-      // Rect sector state
-      this.inSector = true; this.handoffPending=false; this.pendingState=null; 
-      // coloring / state bookkeeping
-this.everInRect = env.inRect(this.x_nm, this.y_nm, this.alt_ft); // ever been *in sector* (3D)
-this.hoMarked   = false;                             // we marked H/O manually
+      // Rect/sector state
+this.inSector  = true;
+this.handedOff = false;   // true = we’ve transferred control (no longer ours)
+this.hoArmed   = false;   // true = user tapped H/O (armed for auto/next handoff)
+
+// coloring / state bookkeeping
+this.everInRect = env.inRect(this.x_nm, this.y_nm, this.alt_ft); // ever been in sector (3D)
+
 
     }
     setHeading(h){ this.navMode=null; this.directWptId=null; this.tgtHdg=mod360(h); }
@@ -618,17 +763,19 @@ this.hoMarked   = false;                             // we marked H/O manually
 
 
     holdAltitude(){ this.tgtAlt=this.alt_ft; this.vs_fpm=0; }
-    setSpeedKt(kt){
-  this.tgtSpeedMode="KT";
-  this.tgtSpd_kt=Math.max(60, kt|0);
-  this.tgtMach=null;
-  this.managedSpd = false;
+    setSpeedKt(kt){ // interpreted as IAS
+  this.tgtSpeedMode = "KT";
+  this.tgtIAS_kt    = Math.max(60, kt|0);
+  this.tgtSpd_kt    = this.tgtIAS_kt; // keep UI compatible
+  this.tgtMach      = null;
+  this.managedSpd   = false;
 }
-    setMach(m){
-  this.tgtSpeedMode="MACH";
-  this.tgtMach=clamp(m,0.3,0.99);
-  this.managedSpd = false;
+setMach(m){
+  this.tgtSpeedMode = "MACH";
+  this.tgtMach      = clamp(m,0.3,0.99);
+  this.managedSpd   = false;
 }
+
 
     directTo(id){ this.navMode="DIRECT"; this.directWptId=id; }
     get mach(){ return this.spd_kt/isaSpeedOfSoundKts(this.alt_ft); }
@@ -641,115 +788,185 @@ this.hoMarked   = false;                             // we marked H/O manually
 
 
     update(dt, env){
-        // Auto speed schedule (until user overrides)
-      if (this.managedSpd){
-  this.tgtSpeedMode = "KT";
-  this.tgtSpd_kt    = managedSpeedTargetKt(this);
-  this.tgtMach      = null;
+        
+
+// --- DIRECT-to nav (with fly-by lead turn) ---
+if (this.navMode==="DIRECT" && this.directWptId!=null){
+  const cur = env.getWaypoint(this.directWptId);
+  if (cur){
+    // Default: steer to the current fix
+    const hdgTo = bearingFromTo(this.x_nm, this.y_nm, cur.x_nm, cur.y_nm);
+    this.tgtHdg = hdgTo;
+    const dist  = Math.hypot(cur.x_nm - this.x_nm, cur.y_nm - this.y_nm);
+
+    // If this DIRECT target is in our route and there’s a next fix, start a fly-by turn early
+    const idxInRoute = Array.isArray(this.route) ? this.route.indexOf(this.directWptId) : -1;
+    if (idxInRoute >= 0 && idxInRoute + 1 < this.route.length){
+      const nxt = env.getWaypoint(this.route[idxInRoute + 1]);
+      const leadNm = leadTurnDistanceNm(this, cur, nxt);
+
+      if (dist <= Math.max(leadNm, FIX_PASS_NM * 0.5)){ // don’t be absurdly early
+        // Advance immediately to next leg
+        this.directWptId = null;
+        this.navMode  = "ROUTE";
+        this.routeIdx = idxInRoute + 1;
+
+        // Steer into outbound course right away
+        const outHdg = bearingFromTo(cur.x_nm, cur.y_nm, nxt.x_nm, nxt.y_nm);
+        this.tgtHdg = outHdg;
+
+        this.prevDistToTarget = null;
+        this.lastNavTargetId  = null;
+      }
+    }
+
+    // Standard pass/trend logic if we’re still on the current DIRECT
+    if (this.navMode === "DIRECT"){
+      if (this.lastNavTargetId !== this.directWptId) this.prevDistToTarget = null;
+
+      const passed =
+        dist < FIX_PASS_NM ||
+        (this.prevDistToTarget != null &&
+         this.prevDistToTarget < FIX_PASS_TREND_NM &&
+         dist > this.prevDistToTarget);
+
+      if (passed){
+        const idx = Array.isArray(this.route) ? this.route.indexOf(this.directWptId) : -1;
+        this.directWptId = null;
+
+        if (idx >= 0 && idx + 1 < this.route.length){
+          this.routeIdx = idx + 1;
+          this.navMode  = "ROUTE";
+        } else {
+          this.navMode = null;
+          this.tgtHdg  = this.hdg;
+          if (idx >= 0 && idx === (this.route?.length || 0) - 1){
+            if (this.finishedAtSec == null) this.finishedAtSec = simNowSec;
+          }
+        }
+        this.prevDistToTarget = null;
+        this.lastNavTargetId  = null;
+      } else {
+        this.lastNavTargetId  = this.directWptId;
+        this.prevDistToTarget = dist;
+      }
+    }
+  } else {
+    // Waypoint missing → cancel DIR and hold current
+    this.directWptId = null;
+    this.navMode     = null;
+    this.tgtHdg      = this.hdg;
+    this.prevDistToTarget = null;
+    this.lastNavTargetId  = null;
+  }
 }
 
-      if(this.tgtSpeedMode==="MACH" && this.tgtMach) this.tgtSpd_kt=this.tgtMach*isaSpeedOfSoundKts(this.alt_ft);
-      let targetSpd=this.tgtSpd_kt;
-      if(env.restrict250 && this.alt_ft<=10000) targetSpd=Math.min(targetSpd,250);
 
-      // --- DIRECT-to nav ---
-if (this.navMode==="DIRECT" && this.directWptId!=null){
-  const w = env.getWaypoint(this.directWptId);
-  if (w){
-    const hdgTo = mod360(toDeg(Math.atan2(w.x_nm-this.x_nm, -(w.y_nm-this.y_nm))));
+// --- ROUTE nav: fly-by turns with lead distance ---
+if (this.navMode==="ROUTE" && this.routeIdx < this.route.length){
+  const curId = this.route[this.routeIdx];
+  const cur   = env.getWaypoint(curId);
+  if (cur){
+    // Steer to current fix by default
+    const hdgTo = bearingFromTo(this.x_nm, this.y_nm, cur.x_nm, cur.y_nm);
     this.tgtHdg = hdgTo;
-    const dist = Math.hypot(w.x_nm-this.x_nm, w.y_nm-this.y_nm);
+    const dist  = Math.hypot(cur.x_nm - this.x_nm, cur.y_nm - this.y_nm);
 
-    // trend detection (reset if target changes)
-    if (this.lastNavTargetId !== this.directWptId) this.prevDistToTarget = null;
+    if (this.lastNavTargetId !== curId) this.prevDistToTarget = null;
 
-    const passed =
-      dist < FIX_PASS_NM ||
-      (this.prevDistToTarget != null &&
-       this.prevDistToTarget < FIX_PASS_TREND_NM &&
-       dist > this.prevDistToTarget);
+    // If there is a next leg, start the turn early based on geometry
+    const nxtId = this.route[this.routeIdx + 1] ?? null;
+    if (nxtId != null){
+      const nxt    = env.getWaypoint(nxtId);
+      const leadNm = leadTurnDistanceNm(this, cur, nxt);
 
-    if (passed){
-      // Try to rejoin FPL after this fix
-      const idxInRoute = Array.isArray(this.route) ? this.route.indexOf(this.directWptId) : -1;
-      this.directWptId = null;
+      if (dist <= Math.max(leadNm, FIX_PASS_NM * 0.5)){
+        // Early advance (fly-by)
+        this.routeIdx++;
+        this.prevDistToTarget = null;
+        this.lastNavTargetId  = null;
 
-      if (idxInRoute >= 0 && idxInRoute + 1 < this.route.length){
-        this.routeIdx = idxInRoute + 1;
-        this.navMode = "ROUTE";
-      } else {
-        // No FPL/no next fix → continue present heading
-        this.navMode = null;
-        this.tgtHdg = this.hdg;
-        // If we just passed the last route fix, mark finished time
-        if (idxInRoute >= 0 && idxInRoute === (this.route?.length || 0) - 1){
-            if (this.finishedAtSec == null) this.finishedAtSec = simNowSec;
+        // If route ended right here, fall through to completion block below on next tick
+        if (this.routeIdx < this.route.length){
+          // Immediately steer to outbound
+          const outHdg = bearingFromTo(cur.x_nm, cur.y_nm, nxt.x_nm, nxt.y_nm);
+          this.tgtHdg = outHdg;
         }
       }
-      this.prevDistToTarget = null;
-      this.lastNavTargetId  = null;
-    } else {
-      this.lastNavTargetId  = this.directWptId;
-      this.prevDistToTarget = dist;
+    }
+
+    // Standard pass/trend fallback if we didn’t early-advance this tick
+    if (this.lastNavTargetId === curId || this.prevDistToTarget !== null){
+      const passed =
+        dist < FIX_PASS_NM ||
+        (this.prevDistToTarget != null &&
+         this.prevDistToTarget < FIX_PASS_TREND_NM &&
+         dist > this.prevDistToTarget);
+
+      if (passed){
+        this.routeIdx++;
+        this.prevDistToTarget = null;
+        this.lastNavTargetId  = null;
+      } else {
+        this.lastNavTargetId  = curId;
+        this.prevDistToTarget = dist;
+      }
+    }
+
+    // Completion: if we just consumed the last fix, continue present heading
+    if (this.routeIdx >= this.route.length){
+      this.navMode = null;
+      this.tgtHdg  = this.hdg;
+      if (this.finishedAtSec == null) this.finishedAtSec = simNowSec;
     }
   } else {
-    // waypoint missing → cancel DIR and hold current
-    this.directWptId = null;
     this.navMode = null;
-    this.tgtHdg = this.hdg;
+    this.tgtHdg  = this.hdg;
     this.prevDistToTarget = null;
-    this.lastNavTargetId = null;
+    this.lastNavTargetId  = null;
   }
 }
 
-// --- ROUTE nav: fly fix-to-fix, same pass logic ---
-if (this.navMode==="ROUTE" && this.routeIdx < this.route.length){
-  const targetId = this.route[this.routeIdx];
-  const w = env.getWaypoint(targetId);
-  if (w){
-    const hdgTo = mod360(toDeg(Math.atan2(w.x_nm-this.x_nm, -(w.y_nm-this.y_nm))));
-    this.tgtHdg = hdgTo;
-    const dist = Math.hypot(w.x_nm-this.x_nm, w.y_nm-this.y_nm);
-
-    if (this.lastNavTargetId !== targetId) this.prevDistToTarget = null;
-
-    const passed =
-      dist < FIX_PASS_NM ||
-      (this.prevDistToTarget != null &&
-       this.prevDistToTarget < FIX_PASS_TREND_NM &&
-       dist > this.prevDistToTarget);
-
-    if (passed){
-      this.routeIdx++;
-      this.prevDistToTarget = null;
-      this.lastNavTargetId  = null;
-
-      if (this.routeIdx >= this.route.length){
-  this.navMode = null;   // route complete → continue present heading
-  this.tgtHdg = this.hdg;
-  if (this.finishedAtSec == null) this.finishedAtSec = simNowSec;
-     }
-
-    } else {
-      this.lastNavTargetId  = targetId;
-      this.prevDistToTarget = dist;
-    }
-  } else {
-    // target vanished → drop to present heading
-    this.navMode = null;
-    this.tgtHdg = this.hdg;
-    this.prevDistToTarget = null;
-    this.lastNavTargetId = null;
-  }
-}
 
 
 
       let diff = mod360(this.tgtHdg-this.hdg); if(diff>180) diff-=360;
       const maxTurn=this.turnRateDps*dt; if(Math.abs(diff)<maxTurn) this.hdg=this.tgtHdg; else this.hdg=mod360(this.hdg+Math.sign(diff)*maxTurn);
 
-      const dSpd=targetSpd-this.spd_kt; const maxAcc=this.accel_ktps*dt;
-      if(Math.abs(dSpd)<maxAcc) this.spd_kt=targetSpd; else this.spd_kt+=Math.sign(dSpd)*maxAcc;
+    /* === SPEED MODEL (IAS ↔ TAS ↔ Mach) ================================ */
+// Managed schedule → IAS target
+if (this.managedSpd){
+  this.tgtSpeedMode = "KT";                 // IAS mode
+  this.tgtIAS_kt    = managedSpeedTargetKt(this);
+  this.tgtMach      = null;
+}
+
+// Mach target → IAS (via TAS)
+if (this.tgtSpeedMode === "MACH" && this.tgtMach){
+  const a_kts  = isaSpeedOfSoundKts(this.alt_ft);
+  const tasTgt = this.tgtMach * a_kts;
+  this.tgtIAS_kt = tasToIas(tasTgt, this.alt_ft);
+}
+
+
+
+// Accelerate in IAS space
+{
+  const dIAS = this.tgtIAS_kt - this.ias_kt;
+  const maxAccIAS = this.accel_ktps * dt;
+  if (Math.abs(dIAS) < maxAccIAS) this.ias_kt = this.tgtIAS_kt;
+  else this.ias_kt += Math.sign(dIAS) * maxAccIAS;
+}
+
+// Convert IAS→TAS; physics uses TAS; GS = TAS (no wind)
+{
+  const tasNow = iasToTas(this.ias_kt, this.alt_ft);
+  this.spd_kt  = tasNow;
+  // keep legacy target field for any UI still reading it
+  this.tgtSpd_kt = this.tgtIAS_kt;
+}
+/* =================================================================== */
+
 
       if (this.alt_ft !== this.tgtAlt){
   const climbing = this.tgtAlt > this.alt_ft;
@@ -788,32 +1005,45 @@ if (this.navMode==="ROUTE" && this.routeIdx < this.route.length){
       // Sector (rectangle)
 const inside = env.inRect(this.x_nm, this.y_nm, this.alt_ft);
 if (inside) this.everInRect = true;
-// FIX: compute sector crossing flags and update state
+
+// crossing flags
 const leftSector    = this.inSector && !inside;
 const enteredSector = !this.inSector && inside;
+
+// update geometry state
 this.inSector = inside;
 
+// Reacquire on entry: once inside, we control again
+if (enteredSector){
+  this.handedOff = false;
+}
 
+// On exit: optional auto-handoff + your existing behaviour
 if (leftSector) {
-  // On exit: go DIRECT to the final fix in the current FPL (if any).
+  // Complete handoff if auto is on, or if user armed H/O
+  if (env.autoHandoff || this.hoArmed){
+    this.handedOff = true;
+    this.hoArmed   = false; // disarm after use
+  }
+
+  // Your existing exit logic
   const hasRoute = Array.isArray(this.route) && this.route.length > 0;
   if (hasRoute) {
     const lastId = this.route[this.route.length - 1];
     this.directTo(lastId);
     this.navMode = "DIRECT";
   } else {
-    // no plan — keep present heading as a fallback
     this.navMode = null;
     this.directWptId = null;
     this.tgtHdg = this.hdg;
   }
 
-  // NEW: Arrivals keep descending after leaving our sector to reach FL0.
-  // (Descent stays 2000 fpm; only climbs ≥ FL250 use 500 fpm elsewhere.)
+  // Arrivals keep descending after leaving our sector to reach FL0.
   if (this.role === 'arrival') {
     this.setAltitude(0, 2000);
   }
 }
+
 
 
       // Dotted trail (every step call adds one); keep only last 5
@@ -828,6 +1058,14 @@ const wrap=document.getElementById('radarWrap');
 let W=0,H=0,cx=0,cy=0;
 // Center shift in **pixels** ( +x = push content right, -y = push content up )
 const CENTER_SHIFT = { x: -90, y: 60 };  // tweak to taste
+// Runtime pan offset in pixels (updated by RMB drag)
+let PAN = { x: 0, y: 0 };
+
+// Input state for panning
+let isPanning = false;
+let panStartClient = { x: 0, y: 0 };
+let panStartPx = { x: 0, y: 0 };
+
 
 let booted = false;
 
@@ -835,8 +1073,9 @@ function resize(){
   const r=wrap.getBoundingClientRect();
   canvas.width=r.width; canvas.height=r.height;
   W=canvas.width; H=canvas.height;
-cx = W/2 + CENTER_SHIFT.x;
-cy = H/2 + CENTER_SHIFT.y;
+cx = W/2 + CENTER_SHIFT.x + PAN.x;
+cy = H/2 + CENTER_SHIFT.y + PAN.y;
+
 
   if (booted) drawAll(); // only redraw after full boot
   repositionLevelPicker();
@@ -984,6 +1223,7 @@ function openLevelPicker(anchorEl, currentFL, onSelect){
 
   input.focus(); input.select();
 }
+
 
 function openWptPicker(anchorEl, ac){
   closeLevelPicker?.(); // single instance (reuse your level picker closer)
@@ -1150,6 +1390,111 @@ function openHeadingPicker(anchorEl, ac){
 
   input.focus(); input.select();
 }
+function openIASPicker(anchorEl, ac){
+  closeLevelPicker?.(); // single instance
+
+  const picker = document.createElement('div');
+  picker.className = 'levelPicker';
+  picker.id = 'iasPicker';
+
+  // Header with type-to-set
+  const hdr = document.createElement('div');
+  hdr.className = 'hdr';
+  hdr.innerHTML = `<input id="iasInput" type="text" inputmode="numeric" placeholder="IAS kt (e.g. 250)">`;
+  picker.appendChild(hdr);
+  const input = hdr.querySelector('#iasInput');
+
+  // Current / suggested
+  const curIAS = Math.round(ac.tgtSpeedMode==='KT' ? ac.tgtIAS_kt : ac.ias_kt);
+  input.value = String(curIAS);
+
+  // Quick helper
+  const applyIAS = (ias) => {
+    let v = Math.max(60, Math.min(ias|0, 460));
+    if (env.restrict250 && ac.alt_ft <= 10000) v = Math.min(v, 250); // 250kt rule
+    ac.setSpeedKt(v);
+    state.selectedId = ac.id;
+    updateSelectedPanel(); drawAll();
+    closeLevelPicker?.();
+  };
+
+  // Row helper
+  function addRow(content, onPick, selected=false, muted=false){
+    const row = document.createElement('div');
+    row.className = 'item';
+    if (selected) row.setAttribute('aria-selected','true');
+    if (muted) row.style.opacity = .6;
+    row.textContent = content;
+    row.addEventListener('click', (ev)=>{
+      ev.stopPropagation(); ev.preventDefault();
+      onPick();
+    });
+    picker.appendChild(row);
+  }
+
+  // Top row: Managed (auto) — shows current target at this instant
+  const managedNow = Math.round(managedSpeedTargetKt(ac));
+  addRow(
+    `Managed (auto) — now ≈ ${managedNow} kt`,
+    ()=>{
+      ac.managedSpd = true;                 // hand control back to schedule
+      ac.tgtSpeedMode = "KT";               // stays IAS-driven
+      state.selectedId = ac.id;
+      updateSelectedPanel(); drawAll();
+      closeLevelPicker?.();
+    },
+    ac.managedSpd === true
+  );
+
+  // Divider-ish hint
+  const tip0 = document.createElement('div');
+  tip0.className = 'tip';
+  tip0.textContent = 'Fixed IAS (manual):';
+  picker.appendChild(tip0);
+
+  // Quick picks 200..320
+const quick = Array.from({length: 13}, (_,i)=>200+i*10);
+for (const v of quick){
+  const tas  = iasToTas(v, ac.alt_ft) | 0;
+  const mach = (tas / isaSpeedOfSoundKts(ac.alt_ft)).toFixed(2);
+  addRow(`${v} kt  (≈TAS ${tas}, M${mach})`, ()=>applyIAS(v),
+         (!ac.managedSpd && ac.tgtSpeedMode==='KT' && Math.abs(curIAS - v) < 3));
+}
+
+
+  // Footer hint
+  const tip = document.createElement('div');
+  tip.className = 'tip';
+  tip.textContent = 'Type any IAS between 200-320kt and press Enter';
+  picker.appendChild(tip);
+
+  // Attach & remember anchor
+  wrap.appendChild(picker);
+  const tagEl   = anchorEl.closest('.tag');
+  const trackId = tagEl ? parseInt(tagEl.dataset.trackId,10) : null;
+  if (tagEl) tagEl.classList.add('show-ops');
+  window._levelPicker = { el: picker, meta: { trackId, field: 'spd' } };
+  repositionLevelPicker?.();
+
+  // Enter to set
+  input.addEventListener('keydown', (ev)=>{
+    if (ev.key === 'Enter'){
+      const n = parseInt(String(input.value).replace(/[^\d]/g,''),10);
+      if (Number.isFinite(n)) applyIAS(n);
+    } else if (ev.key === 'Escape'){
+      closeLevelPicker?.();
+    }
+  });
+
+  // Close on outside/Esc
+  const onDocDown = (ev)=>{ if (!picker.contains(ev.target)) closeLevelPicker?.(); };
+  const onKey     = (ev)=>{ if (ev.key==='Escape') closeLevelPicker?.(); };
+  document.addEventListener('pointerdown', onDocDown, {capture:true, once:true});
+  document.addEventListener('keydown', onKey, {once:true});
+
+  input.focus(); input.select();
+}
+
 
 function openMachPicker(anchorEl, ac){
   closeLevelPicker?.();
@@ -1485,7 +1830,7 @@ const SECTOR_BBOX = (() => {
 
 
   const env = {
-  restrict250:true, autoHandoff:true,
+  restrict250:false, autoHandoff:true,
   // keep rectW/H for legacy UI/spawn but derive from polygon bbox
   rectW: SECTOR_BBOX.width,
   rectH: SECTOR_BBOX.height,
@@ -1508,6 +1853,7 @@ const SECTOR_BBOX = (() => {
     pred1:true, pred3:true, pred5:true, predFor:"all",
     lookaheadMin:2,
     conflictsNow:[], conflictsPred:[],
+    conflictsPredDetail:[],  // ← geometry for continuous amber band
     addingWpt:false,
     refreshSec:3,
     measure:null,        // active ruler being drawn {fromX_nm,fromY_nm,toX_nm,toY_nm}
@@ -2515,6 +2861,13 @@ function spawnConflictPack(useRoutes=false){
 
   // ---------- Conflict detection ----------
   const sepNM=5, sepFT=1000;
+  // Predicted band config (draw amber segments from lookahead → impact)
+const PREDICT_SCAN_STEP_SEC = 10;  // draw a segment every 10 s
+const PREDICT_MAX_EXTRA_SEC = 360; // scan up to +6 min beyond lookahead
+
+// Store rich geometry per predicted pair for drawing the continuous band
+// Each entry: { aId, bId, tStart, tImpact, segments:[{ax,ay,bx,by}] }
+
   function project(ac,tSec){
     const dist_nm=ac.spd_kt*nmPerKtPerSec*tSec;
     const x=ac.x_nm+Math.sin(toRad(ac.hdg))*dist_nm;
@@ -2527,23 +2880,108 @@ function spawnConflictPack(useRoutes=false){
     }
     return {x,y,alt};
   }
+  function projectAt(ac, tSec){
+  // reuse your existing 'project' logic
+  return project(ac, tSec);
+}
+
+// true if track takes part in an active conflict NOW
+function hasActiveConflict(id){
+  return state.conflictsNow.some(pair => Array.isArray(pair) ? (pair[0]===id || pair[1]===id)
+                                                             : (pair.aId===id || pair.bId===id));
+}
+
+// true if track takes part in a predicted conflict (within lookahead window)
+function hasPredConflict(id){
+  return state.conflictsPred.some(pair => Array.isArray(pair) ? (pair[0]===id || pair[1]===id)
+                                                              : (pair.aId===id || pair.bId===id));
+}
+
+/**
+ * Build the "continuous" predicted band between two aircraft:
+ * from tStart (= lookahead) stepping every dt until the first
+ * loss of separation; returns geometry and impact time.
+ */
+function buildPredictedConflictBand(a, b, tStartSec, extraMaxSec=PREDICT_MAX_EXTRA_SEC, dt=PREDICT_SCAN_STEP_SEC){
+  const segments = [];
+  const sepN = sepNM, sepF = sepFT;
+  const tEnd = tStartSec + extraMaxSec;
+
+  let tImpact = null;
+  let lastOK = null;
+
+  // coarse sweep; keep each segment (ax,ay)–(bx,by) we draw
+  for(let t=tStartSec; t<=tEnd; t+=dt){
+    const pa = projectAt(a, t);
+    const pb = projectAt(b, t);
+    const dnm = Math.hypot(pa.x - pb.x, pa.y - pb.y);
+    const dft = Math.abs(pa.alt - pb.alt);
+
+    // store this time step segment to draw a continuous band
+    const ax = cx + nmToPx(pa.x), ay = cy + nmToPx(pa.y);
+    const bx = cx + nmToPx(pb.x), by = cy + nmToPx(pb.y);
+    segments.push({ ax, ay, bx, by, t });
+
+    if (dnm < sepN && dft < sepF){
+      tImpact = t;
+      break;
+    }
+    lastOK = t;
+  }
+
+  // (Optional) tiny refine back from tImpact for nicer end-cap
+  if (tImpact != null && dt > 1){
+    let lo = Math.max(tStartSec, (lastOK ?? tStartSec));
+    let hi = tImpact, mid;
+    for(let k=0;k<8;k++){
+      mid = (lo+hi)/2;
+      const pa = projectAt(a, mid);
+      const pb = projectAt(b, mid);
+      const dnm = Math.hypot(pa.x - pb.x, pa.y - pb.y);
+      const dft = Math.abs(pa.alt - pb.alt);
+      if (dnm < sepN && dft < sepF) hi = mid; else lo = mid;
+    }
+    tImpact = hi;
+  }
+
+  return { segments, tImpact };
+}
+
   function detectConflicts(){
-    state.conflictsNow.length=0; state.conflictsPred.length=0;
-    for(let i=0;i<state.ac.length;i++){
-      for(let j=i+1;j<state.ac.length;j++){
-        const a=state.ac[i], b=state.ac[j];
-        const dnm=Math.hypot(a.x_nm-b.x_nm,a.y_nm-b.y_nm);
-        const dft=Math.abs(a.alt_ft-b.alt_ft);
-        if(dnm<sepNM && dft<sepFT){ state.conflictsNow.push([a.id,b.id]); continue; }
-        const t=state.lookaheadMin*60; if(t>0){
-          const pa=project(a,t), pb=project(b,t);
-          const dnmP=Math.hypot(pa.x-pb.x,pa.y-pb.y);
-          const dftP=Math.abs(pa.alt-pb.alt);
-          if(dnmP<sepNM && dftP<sepFT) state.conflictsPred.push([a.id,b.id]);
-        }
+  state.conflictsNow.length = 0;
+  state.conflictsPred.length = 0;
+  state.conflictsPredDetail.length = 0;
+
+  const tStart = state.lookaheadMin * 60;   // lookahead start (s)
+  const scan   = PREDICT_MAX_EXTRA_SEC;
+
+  for(let i=0;i<state.ac.length;i++){
+    for(let j=i+1;j<state.ac.length;j++){
+      const a = state.ac[i], b = state.ac[j];
+
+      // --- Current (t=0) check
+      const dnm0 = Math.hypot(a.x_nm - b.x_nm, a.y_nm - b.y_nm);
+      const dft0 = Math.abs(a.alt_ft - b.alt_ft);
+      const nowHit = (dnm0 < sepNM && dft0 < sepFT);
+      if (nowHit){
+        state.conflictsNow.push([a.id, b.id]);
+        continue; // red takes precedence, no need to also mark predicted
+      }
+
+      if (tStart <= 0) continue;
+
+      // --- Predicted band from lookahead → first impact (if any)
+      const band = buildPredictedConflictBand(a, b, tStart, scan, PREDICT_SCAN_STEP_SEC);
+      if (band.tImpact != null){
+        state.conflictsPred.push([a.id, b.id]); // for quick lookups
+        state.conflictsPredDetail.push({
+          aId:a.id, bId:b.id, tStart, tImpact:band.tImpact, segments:band.segments
+        });
       }
     }
   }
+}
+
 
   // ---------- Drawing (split: canvas vs DOM) ----------
   const tagMap = new Map(); // id -> element
@@ -2647,8 +3085,11 @@ tag.addEventListener('mousedown', (ev)=>{
 
       }
       // Update classes/content/position
-      tag.classList.toggle('alert', state.conflictsNow.some(([p,q])=>p===a.id||q===a.id));
-      tag.classList.toggle('warn', !tag.classList.contains('alert') && state.conflictsPred.some(([p,q])=>p===a.id||q===a.id));
+      const nowConflict  = hasActiveConflict(a.id);
+    const predConflict = !nowConflict && hasPredConflict(a.id);
+    tag.classList.toggle('alert', nowConflict);
+    tag.classList.toggle('warn',  predConflict);
+
       // apply state color class for text-only labels
 const st = getTrackState(a);   // uses helpers from step 2.3
 tag.classList.remove('st-controlled','st-inbound','st-intruder','st-outbound');
@@ -2662,27 +3103,82 @@ const cfl   = fmtCFL(a.tgtAlt);
 const type  = a.fp?.type || a.type;
 const wpt   = nextWptName(a, env);
 const vs100 = fmtVS100(a.vs_fpm);
+const gs    = a.spd_kt | 0;  // <-- NEW (TAS ≈ GS)
+
+const badgeHTML = nowConflict
+  ? `<span class="badge alert">CA</span>`
+  : (predConflict ? `<span class="badge warn">MD</span>` : ``);
 
 tag.innerHTML = `
-  <div class="l1"><span data-cs>${a.cs}</span><span class="ho" data-ho="1" title="Toggle H/O">H/O</span></div>
-  <div class="l2"><span data-act="curfl">${curFL}</span>&nbsp;&nbsp;&nbsp;<span data-act="cfl">${cfl}</span>&nbsp;&nbsp;<span data-act="xfl">${fmtXFL(a.xfl_ft)}</span></div>
-  <div class="l2"><span data-act="type">${type}</span>&nbsp;&nbsp;&nbsp;<span data-act="wpt">${wpt}</span></div>
-  <div class="l2 ops">H<span data-act="hdg">${formatHeading(a.hdg)}</span>&nbsp;&nbsp;&nbsp;S<span data-act="spd">${a.spd_kt|0}</span>/M<span data-act="mach">${a.mach.toFixed(2)}</span>&nbsp;&nbsp;VS<span data-act="vs">${vs100}</span></div>
+  ${badgeHTML ? `<div class="badges">${badgeHTML}</div>` : ``}
+  <div class="l1">
+    <span data-cs>${a.cs}</span>
+    <span class="ho" data-ho="1" title="Toggle H/O">H/O</span>
+    <span class="gs">GS${gs}</span>        <!-- NEW: GS on the top-right -->
+  </div>
+  <div class="l2">
+    <span data-act="curfl">${curFL}</span>&nbsp;
+    <span data-act="cfl">${cfl}</span>&nbsp;
+    <span data-act="xfl">${fmtXFL(a.xfl_ft)}</span>
+  </div>
+  <div class="l2">
+    <span data-act="type">${type}</span>&nbsp;&nbsp;
+    <span data-act="wpt">${wpt}</span>
+  </div>
+  <div class="l2 ops">
+    H<span data-act="hdg">${formatHeading(a.hdg)}</span>&nbsp;
+    S<span data-act="spd">${a.ias_kt|0}</span> /                   <!-- IAS here -->
+    M<span data-act="mach">${a.mach.toFixed(2)}</span>&nbsp;
+    VS<span data-act="vs">${vs100}</span>
+  </div>
 `;
+
 
 
 repositionLevelPicker();
 
 
-// wire the tiny H/O toggle (marks a.hoMarked to drive "intruder" color)
+// H/O toggle — MMB (immediate transfer, no arming)
 const hoBtn = tag.querySelector('[data-ho]');
 if (hoBtn){
-  hoBtn.onclick = (ev)=>{
-    ev.stopPropagation();
-    a.hoMarked = !a.hoMarked;
-    layoutTags(); drawCanvasOnly();
+  const updateHO = ()=>{
+    hoBtn.setAttribute('aria-pressed', a.handedOff ? 'true' : 'false');
+    hoBtn.textContent = a.handedOff ? 'XFER' : 'H/O';
+    hoBtn.title = a.handedOff ? "Transferred (MMB to take back)" : "MMB to transfer now";
   };
+
+  const redraw = ()=>{ layoutTags(); drawCanvasOnly(); updateSelectedPanel(); };
+
+  // block browser autoscroll on MMB
+  hoBtn.addEventListener('mousedown', (ev)=>{
+    if (ev.button === 1){ ev.preventDefault(); ev.stopPropagation(); }
+  }, true);
+
+  // MMB = toggle transfer immediately (no arming)
+  hoBtn.addEventListener('auxclick', (ev)=>{
+    if (ev.button !== 1) return;
+    ev.preventDefault(); ev.stopPropagation();
+    a.handedOff = !a.handedOff;
+    a.hoArmed = false; // ensure no lingering "armed" flag anywhere
+    updateHO(); redraw();
+  });
+
+  // Optional fallback for trackpads: Alt+Click
+  hoBtn.addEventListener('click', (ev)=>{
+    if (!ev.altKey) return;
+    ev.preventDefault(); ev.stopPropagation();
+    a.handedOff = !a.handedOff;
+    a.hoArmed = false;
+    updateHO(); redraw();
+  });
+
+  updateHO();
 }
+
+
+
+
+
 // Middle-click on callsign => open SFP
 const csBtn = tag.querySelector('[data-cs]');
 if (csBtn){
@@ -2729,13 +3225,11 @@ withMMB(hdgEl, ()=>{
   openHeadingPicker(hdgEl, a);
 });
 
-// S (kt)
+// S (IAS)
 const spdEl = act('spd'); blockMMB(spdEl);
 withMMB(spdEl, ()=>{
-  state.selectedId=a.id; updateSelectedPanel();
-  const inp = document.getElementById('spd');
-  setEditing('spd');
-  inp.focus(); inp.select();
+  state.selectedId = a.id; updateSelectedPanel();
+  openIASPicker(spdEl, a);
 });
 
 // M
@@ -3161,8 +3655,20 @@ canvas.addEventListener('pointerdown', e=>{
   const rect = canvas.getBoundingClientRect();
   const xPx = e.clientX - rect.left, yPx = e.clientY - rect.top;
 
+  // Start panning with RMB, or with LMB while RMB is held (no Shift)
+  const wantsPan = (e.button === 2) || (e.button === 0 && (e.buttons & 2));
+  if (!e.shiftKey && wantsPan){
+    isPanning = true;
+    panStartClient.x = e.clientX; panStartClient.y = e.clientY;
+    panStartPx.x = PAN.x; panStartPx.y = PAN.y;
+    try{ canvas.setPointerCapture(e.pointerId); }catch{}
+    e.preventDefault();
+    return;
+  }
+
   // Shift + Left Click = smart start/finish (snaps to aircraft if close)
   if (e.shiftKey && e.button === 0) {
+    try{ canvas.setPointerCapture(e.pointerId); }catch{}
     handleMeasureSmartClick(xPx, yPx);
     e.preventDefault();
     return;
@@ -3181,9 +3687,22 @@ canvas.addEventListener('pointerdown', e=>{
 
 
 canvas.addEventListener('pointermove', e=>{
+  // Panning
+  if (isPanning){
+    const dx = e.clientX - panStartClient.x;
+    const dy = e.clientY - panStartClient.y;
+    PAN.x = panStartPx.x + dx;
+    PAN.y = panStartPx.y + dy;
+    // Recompute center and redraw
+    cx = W/2 + CENTER_SHIFT.x + PAN.x;
+    cy = H/2 + CENTER_SHIFT.y + PAN.y;
+    drawAll();
+    e.preventDefault();
+    return;
+  }
+
+  // Measuring preview follows cursor (works over labels thanks to capture)
   if(!state.measure) return;
-  // If we're mid-placing the second endpoint and it's NOT an aircraft-linked endpoint,
-  // update it to follow the cursor for a live preview.
   const rect=canvas.getBoundingClientRect();
   const xPx=e.clientX-rect.left, yPx=e.clientY-rect.top;
 
@@ -3191,7 +3710,6 @@ canvas.addEventListener('pointermove', e=>{
   if(state.measure.to && state.measure.to.type === 'ac') return;
 
   const {x_nm,y_nm}=pxToNm(xPx,yPx);
-  // Ensure the new-style shape exists
   if(!state.measure.from && 'fromX_nm' in state.measure){
     state.measure = { from:{x_nm:state.measure.fromX_nm, y_nm:state.measure.fromY_nm},
                       to:{x_nm, y_nm} };
@@ -3202,20 +3720,31 @@ canvas.addEventListener('pointermove', e=>{
 });
 
 
+
 canvas.addEventListener('pointerup', e=>{
-  // keep the ruler until RMB/Esc clears or commits; release capture if we had it
+  if (isPanning) isPanning = false;
   try { canvas.releasePointerCapture(e.pointerId); } catch {}
 });
 
+
 canvas.addEventListener('pointercancel', e=>{
+  isPanning = false;
   try { canvas.releasePointerCapture(e.pointerId); } catch {}
 });
 
 // Allow context menu unless we just handled a commit above
+// Suppress browser menu while panning or if a ruler is active
+// Always suppress right-click menu on the radar canvas
 canvas.addEventListener('contextmenu', e=>{
-  // If a ruler is active, let RMB commit handler above run and suppress menu; otherwise allow menu.
-  if (state.measure) e.preventDefault();
+  e.preventDefault();
 });
+// Also suppress right-click menu on the wrapper (edges around the canvas)
+wrap.addEventListener('contextmenu', e=>{
+  e.preventDefault();
+});
+
+
+
 
   function flashSelected(){ const card=document.getElementById('selectedInfo'); card.classList.add('selected'); setTimeout(()=>card.classList.remove('selected'), 450); }
 
@@ -3231,8 +3760,9 @@ canvas.addEventListener('contextmenu', e=>{
   </div>
   <div class="small">Targets: H${formatHeading(a.tgtHdg)} • ${
   a.tgtSpeedMode==='MACH'
-    ? ('M'+(a.tgtMach?.toFixed(2) ?? (a.tgtSpd_kt/isaSpeedOfSoundKts(a.alt_ft)).toFixed(2)))
-    : ('S'+((a.tgtSpd_kt|0))+' kt')
+  ? ('M'+(a.tgtMach?.toFixed(2) ?? (a.spd_kt/isaSpeedOfSoundKts(a.alt_ft)).toFixed(2)))
+  : ('S'+(Math.round(a.tgtIAS_kt))+' kt')
+
 } • ALT ${formatAltitude(a.tgtAlt)} • VS${fmtVS100(a.vs_fpm)} • SEC ${a.inSector?'IN':'OUT'}
 
 `;
@@ -3284,6 +3814,47 @@ document.getElementById('spawnConflict').addEventListener('click', ()=>{
   else if (e.target.value==='lg') document.body.classList.add('label-lg');
 });
 
+// 20…800 inclusive, every 20 NM
+const RANGE_STEPS = Array.from({ length: 40 }, (_, i) => 20 * (i + 1));
+
+
+function isEditingUI(ev){
+  if (state.editing) return true;
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'SELECT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return true;
+  const picker = window._levelPicker?.el;
+  if (picker && picker.contains(ev.target)) return true;
+  return false;
+}
+
+function rebuildRangeSelect(){
+  const sel = document.getElementById('rangeSel');
+  if (!sel) return;
+  sel.innerHTML = RANGE_STEPS
+    .map(n => `<option${n===rangeNM ? ' selected' : ''}>${n}</option>`)
+    .join('');
+}
+
+function setRangeNM(newNm){
+  rangeNM = newNm;
+  rebuildRangeSelect(); // keep the dropdown in sync even for 100/140/etc
+  drawAll();
+}
+
+
+// Scroll only on the radar area; up = zoom in, down = zoom out
+wrap.addEventListener('wheel', (e)=>{
+  if (isEditingUI(e)) return;          // don’t steal scroll while editing
+  const dir = e.deltaY < 0 ? -1 : 1;   // wheel up/down
+  const idx = RANGE_STEPS.indexOf(rangeNM);
+  if (idx === -1) return;
+  const next = clamp(idx + dir, 0, RANGE_STEPS.length - 1);
+  if (next !== idx){
+    setRangeNM(RANGE_STEPS[next]);
+    e.preventDefault();                // allow smooth zoom without page scroll
+  }
+}, { passive: false });
+
 
   for(const id of ["pred1","pred3","pred5"]) document.getElementById(id).addEventListener('change', e=>{ state[id]=e.target.checked; drawAll(); });
   document.getElementById('predFor').addEventListener('change', e=>{ state.predFor=e.target.value; drawAll(); });
@@ -3296,7 +3867,7 @@ document.getElementById('spawnConflict').addEventListener('click', ()=>{
     drawAll();
   });
 
-  document.getElementById('spd250').addEventListener('change', e=>{ env.restrict250=e.target.checked; });
+
 
   document.getElementById('addWpt').addEventListener('click', ()=>{
   alert("Dynamic waypoints are disabled in this version.");
@@ -3308,10 +3879,18 @@ document.getElementById('clearWpt').addEventListener('click', ()=>{
 
   document.getElementById('autoHandoff').addEventListener('change', e=>{ env.autoHandoff=e.target.checked; });
   document.getElementById('btnHandoff').addEventListener('click', ()=>{
-    const a=getSelected(); if(!a){ alert("Select a track first."); return; }
-    if(a.handoffPending){ a.inSector=a.pendingState; a.handoffPending=false; a.pendingState=null; }
-    updateSelectedPanel(); drawAll();
-  });
+  const a = getSelected(); 
+  if(!a){ alert("Select a track first."); return; }
+
+  // Manual toggle of transfer of control (independent of geometry)
+  a.handedOff = !a.handedOff;
+  if (a.handedOff) a.hoArmed = false; // disarm when completed
+
+  layoutTags();
+  updateSelectedPanel(); 
+  drawAll();
+});
+
   document.getElementById('btnRect').addEventListener('click', ()=>{
     env.rectW=Math.max(5,parseFloat(document.getElementById('rectW').value)||env.rectW);
     env.rectH=Math.max(5,parseFloat(document.getElementById('rectH').value)||env.rectH);
@@ -3336,9 +3915,10 @@ document.getElementById('clearWpt').addEventListener('click', ()=>{
   const altFt = parseAltitudeInput(document.getElementById('alt').value, useFL.checked);
   const vs = parseVsHundreds(document.getElementById('vs').value);
   if(altFt!=null) a.setAltitude(altFt, vs);
-  vsBox.value = "";
+  document.getElementById('vs').value = "";
   updateSelectedPanel(); drawAll();
 });
+
 
 
   document.getElementById('btnHold').addEventListener('click', ()=>{ const a=getSelected(); if(!a) return; a.holdAltitude(); updateSelectedPanel(); drawAll(); });
@@ -3412,6 +3992,8 @@ window.addEventListener('load', () => {
   renderWptList();
   // NEW: sync the actual range to the selected option (160 by default)
   rangeNM = parseInt(document.getElementById('rangeSel').value, 10) || 120;
+    rebuildRangeSelect();
+
 
   spawnPlannedAircraft();
   spawnPlannedAircraft();
