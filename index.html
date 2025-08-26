@@ -422,24 +422,37 @@ const FIX_PASS_NM = 1.2;       // consider a fix 'made' when within this many NM
 const FIX_PASS_TREND_NM = 2.0; // or, if we've been closer than this and range starts increasing, also 'made'
 
 function managedSpeedTargetKt(a){
-  const alt = a.alt_ft;
+  const alt = a.alt_ft|0;
+  const P   = perfFor(a);
 
-  // Base schedule in IAS
-  let tgtIAS = (alt <  5000) ? 220 :
-               (alt < 10000) ? 240 :
-               (alt < 24000) ? 300 :
-               // High level: prefer planned TAS but convert to IAS at current ISA
-               tasToIas(a.fp?.tasKt || 450, alt);
+  let tgtIAS;
+  if (alt <  5000)       tgtIAS = 220;
+  else if (alt < 10000)  tgtIAS = Math.min(P.climbIAS, 250); // honor 250 kt envelope
+  else if (alt < 24000)  tgtIAS = P.climbIAS;
+  else                   tgtIAS = desiredHighIAS(a);          // blend → econ Mach
 
-  // Descents / arrivals: progressive slows (still IAS)
-  if (a.vs_fpm < -200 || a.role === 'arrival'){
+  // Mach max protection
+  tgtIAS = Math.min(tgtIAS, machIasCap(a));
+
+  // Arrivals/descents slow progressively (IAS), allowed to dip below econ Mach
+  const isArrOrDes = (a.vs_fpm < -200) || (a.role === 'arrival');
+  if (isArrOrDes){
     if (alt < 12000) tgtIAS = Math.min(tgtIAS, 280);
     if (alt < 10000) tgtIAS = Math.min(tgtIAS, 240);
     if (alt <  6000) tgtIAS = Math.min(tgtIAS, 220);
     if (alt <  3000) tgtIAS = Math.min(tgtIAS, 200);
   }
-  return tgtIAS;
+
+  // Cruise floor: above FL290, keep near econ Mach unless arriving/descending
+  if (!isArrOrDes && alt >= 29000){
+    const econIAS = iasFromMach(econMach(a), alt);
+    tgtIAS = Math.max(tgtIAS, econIAS * 0.98);   // small tolerance
+  }
+
+  return clamp(tgtIAS, 160, 360);
 }
+
+
 
 
   function isaSpeedOfSoundKts(alt_ft){
@@ -496,6 +509,47 @@ function tasToIas(tas_kt, alt_ft){
   const s = Math.max(1e-6, isaSigma(alt_ft));
   return tas_kt * Math.sqrt(s);
 }
+// === Mach targets & blending helpers ===
+function lerp(a,b,t){ return a + (b-a)*t; }
+function smoothstep(e0,e1,x){
+  const t = clamp((x - e0) / (e1 - e0), 0, 1);
+  return t*t*(3-2*t);
+}
+function perfFor(ac){ return TYPE_PERF[ac.type] || TYPE_PERF.DEFAULT; }
+function econMach(ac){ return perfFor(ac).machCruise; }          // treat machCruise as ECON target
+function maxMach(ac){ return econMach(ac) + 0.03; }              // soft max ~ econ+0.03
+function iasFromMach(m, alt_ft){
+  const a_kts = isaSpeedOfSoundKts(alt_ft);
+  return tasToIas(m * a_kts, alt_ft);
+}
+// Preferred high-level IAS: blend from climb IAS → econ Mach IAS between FL240–290
+function desiredHighIAS(ac){
+  const alt = ac.alt_ft;
+  const iasClimb = perfFor(ac).climbIAS;
+  const iasEcon  = iasFromMach(econMach(ac), alt);
+  const t = smoothstep(24000, 29000, alt);
+  return lerp(iasClimb, iasEcon, t);
+}
+// Max-Mach protection, expressed as IAS at current altitude
+function machIasCap(ac){ return iasFromMach(maxMach(ac), ac.alt_ft); }
+
+// Altitude-tapered climb / descent caps (reuse if you haven’t added them yet)
+function climbVsCapFpm(ac, alt_ft = ac.alt_ft){
+  const P = perfFor(ac);
+  const ceilFt = (P.ceilingFL||410)*100;
+  const frac = clamp(alt_ft/ceilFt, 0, 1);
+  const soft = P.maxClimbFpm * (1 - 0.8*frac*frac) + 500*frac;
+  return Math.max(500, soft|0);
+}
+function descentVsCapFpm(ac){ return Math.abs(perfFor(ac).maxDescentFpm)|0; }
+
+// Altitude-scaled IAS acceleration (slower high up)
+function dynAccelKtps(ac){
+  const base = perfFor(ac).accelIAS_ktps;
+  const s = Math.max(1e-6, isaSigma(ac.alt_ft));
+  return base * (0.6 + 0.4*Math.sqrt(s));
+}
+
 
   function formatHeading(h){
     let n = Math.round(mod360(h));
@@ -588,7 +642,69 @@ function getTrackState(a){
   // --- Short Flight Plan (SFP) & helpers ---
 const DEP_PORTS = ["EPWA","EPMO","EPLL","EPWR","EPPO","EPKK","EPKT","LKPR"];
 const ARR_PORTS = ["EPWA","EPMO","EPLL","EPWR","EPPO","EPKK","EPKT","LKPR"];
-const TYPES     = ["A320","B738","E190","B744","B789"];
+// Expanded fleet mix (medium/long-haul + regionals; jets only to fit your FL spawn logic)
+const TYPES = [
+  // existing
+  "A20N","A21N","A320","A321","B738","B38M","B763","B77W","B789","A332","A359","E190","E75S","CRJ9","B744",
+  // NEW narrowbody/regionals/classics (FL300–380-ish)
+  "A318","A319","B752","B753","B712","MD82","MD90","E170","E175","E195","CRJ2","CRJ7","F70","F100"
+];
+
+
+/**
+ * Simple per-type performance. Units:
+ * - climbIAS: nominal climb IAS above 10k (kt)
+ * - machCruise: typical high-level Mach cap when managed
+ * - maxClimbFpm / maxDescentFpm: envelope caps near low/medium alt
+ * - accelIAS_ktps: base IAS acceleration (kt/s) near low alt
+ * - turnRateDps: standard-rate-ish, heavier jets slightly slower
+ * - ceilingFL: soft service ceiling to taper climbs
+ */
+const TYPE_PERF = {
+  DEFAULT: { climbIAS:300, machCruise:0.78, maxClimbFpm:2400, maxDescentFpm:-3000, accelIAS_ktps:1.0, turnRateDps:3.0, ceilingFL:410 },
+
+  A20N:{ climbIAS:300, machCruise:0.79, maxClimbFpm:2600, maxDescentFpm:-3200, accelIAS_ktps:1.0, turnRateDps:3.0, ceilingFL:390 },
+  A21N:{ climbIAS:305, machCruise:0.79, maxClimbFpm:2600, maxDescentFpm:-3200, accelIAS_ktps:1.0, turnRateDps:3.0, ceilingFL:390 },
+  A320:{ climbIAS:295, machCruise:0.78, maxClimbFpm:2500, maxDescentFpm:-3200, accelIAS_ktps:1.0, turnRateDps:3.0, ceilingFL:390 },
+  A321:{ climbIAS:300, machCruise:0.79, maxClimbFpm:2500, maxDescentFpm:-3200, accelIAS_ktps:0.95,turnRateDps:3.0, ceilingFL:390 },
+
+  B738:{ climbIAS:305, machCruise:0.79, maxClimbFpm:2600, maxDescentFpm:-3300, accelIAS_ktps:1.05,turnRateDps:3.0, ceilingFL:410 },
+  B38M:{ climbIAS:310, machCruise:0.79, maxClimbFpm:2700, maxDescentFpm:-3300, accelIAS_ktps:1.1, turnRateDps:3.0, ceilingFL:410 },
+
+  E190:{ climbIAS:285, machCruise:0.76, maxClimbFpm:2700, maxDescentFpm:-3400, accelIAS_ktps:1.2, turnRateDps:3.2, ceilingFL:390 },
+  E75S:{ climbIAS:275, machCruise:0.75, maxClimbFpm:2800, maxDescentFpm:-3400, accelIAS_ktps:1.25,turnRateDps:3.2, ceilingFL:390 },
+  CRJ9:{ climbIAS:280, machCruise:0.78, maxClimbFpm:2600, maxDescentFpm:-3400, accelIAS_ktps:1.25,turnRateDps:3.2, ceilingFL:390 },
+
+  B763:{ climbIAS:310, machCruise:0.80, maxClimbFpm:2200, maxDescentFpm:-3000, accelIAS_ktps:0.9, turnRateDps:2.8, ceilingFL:410 },
+  B77W:{ climbIAS:320, machCruise:0.84, maxClimbFpm:2200, maxDescentFpm:-3000, accelIAS_ktps:0.85,turnRateDps:2.6, ceilingFL:430 },
+  B789:{ climbIAS:320, machCruise:0.85, maxClimbFpm:2200, maxDescentFpm:-3000, accelIAS_ktps:0.9, turnRateDps:2.8, ceilingFL:430 },
+  A332:{ climbIAS:315, machCruise:0.82, maxClimbFpm:2100, maxDescentFpm:-3000, accelIAS_ktps:0.85,turnRateDps:2.6, ceilingFL:410 },
+  A359:{ climbIAS:325, machCruise:0.85, maxClimbFpm:2300, maxDescentFpm:-3000, accelIAS_ktps:0.9, turnRateDps:2.7, ceilingFL:430 },
+
+  B744:{ climbIAS:320, machCruise:0.85, maxClimbFpm:1800, maxDescentFpm:-2800, accelIAS_ktps:0.7, turnRateDps:2.5, ceilingFL:390 },
+    // ==== Added types (cruise usually FL300–380) ====
+  A318:{ climbIAS:290, machCruise:0.78, maxClimbFpm:2400, maxDescentFpm:-3200, accelIAS_ktps:1.00, turnRateDps:3.0, ceilingFL:390 },
+  A319:{ climbIAS:295, machCruise:0.79, maxClimbFpm:2500, maxDescentFpm:-3200, accelIAS_ktps:1.00, turnRateDps:3.0, ceilingFL:390 },
+
+  B752:{ climbIAS:320, machCruise:0.82, maxClimbFpm:2600, maxDescentFpm:-3200, accelIAS_ktps:0.95, turnRateDps:2.8, ceilingFL:410 },
+  B753:{ climbIAS:315, machCruise:0.82, maxClimbFpm:2300, maxDescentFpm:-3100, accelIAS_ktps:0.90, turnRateDps:2.7, ceilingFL:410 },
+
+  B712:{ climbIAS:285, machCruise:0.77, maxClimbFpm:2400, maxDescentFpm:-3200, accelIAS_ktps:1.05, turnRateDps:3.0, ceilingFL:390 }, // Boeing 717
+  MD82:{ climbIAS:285, machCruise:0.77, maxClimbFpm:2200, maxDescentFpm:-3000, accelIAS_ktps:0.95, turnRateDps:2.9, ceilingFL:370 },
+  MD90:{ climbIAS:290, machCruise:0.77, maxClimbFpm:2300, maxDescentFpm:-3000, accelIAS_ktps:0.95, turnRateDps:2.9, ceilingFL:380 },
+
+  E170:{ climbIAS:270, machCruise:0.75, maxClimbFpm:2800, maxDescentFpm:-3400, accelIAS_ktps:1.25, turnRateDps:3.2, ceilingFL:390 },
+  E175:{ climbIAS:275, machCruise:0.75, maxClimbFpm:2800, maxDescentFpm:-3400, accelIAS_ktps:1.25, turnRateDps:3.2, ceilingFL:390 },
+  E195:{ climbIAS:290, machCruise:0.78, maxClimbFpm:2700, maxDescentFpm:-3400, accelIAS_ktps:1.20, turnRateDps:3.2, ceilingFL:390 },
+
+  CRJ2:{ climbIAS:270, machCruise:0.75, maxClimbFpm:2600, maxDescentFpm:-3400, accelIAS_ktps:1.20, turnRateDps:3.2, ceilingFL:370 },
+  CRJ7:{ climbIAS:275, machCruise:0.77, maxClimbFpm:2700, maxDescentFpm:-3400, accelIAS_ktps:1.20, turnRateDps:3.2, ceilingFL:390 },
+
+  F70 :{ climbIAS:275, machCruise:0.76, maxClimbFpm:2500, maxDescentFpm:-3200, accelIAS_ktps:1.10, turnRateDps:3.1, ceilingFL:370 },
+  F100:{ climbIAS:285, machCruise:0.77, maxClimbFpm:2500, maxDescentFpm:-3200, accelIAS_ktps:1.10, turnRateDps:3.0, ceilingFL:370 },
+
+};
+
 
 const rand = (a,b)=> a + Math.random()*(b-a);
 const randi = (a,b)=> Math.floor(rand(a,b+1));
@@ -686,12 +802,26 @@ function resolveEndpoint(ep){
       this.id=nextId++; this.cs=opts.cs||genCallsign();
       this.x_nm=opts.x_nm??0; this.y_nm=opts.y_nm??0;
       this.hdg=opts.hdg??Math.floor(Math.random()*360);
-      this.alt_ft=opts.alt_ft??(30000);
-      this.spd_kt=opts.spd_kt??(this.alt_ft>24000?450:250);
-      // Canonical speed: keep IAS as the commanded/editable state
-      this.ias_kt = tasToIas(this.spd_kt, this.alt_ft); // derive IAS from initial TAS
+      this.alt_ft = opts.alt_ft ?? 30000;
+
+// Make sure TYPE is known BEFORE we compute any perf caps
+this.type = opts.type ?? pick(TYPES);
+
+// Initial speed (TAS), clamped by type Mach at this altitude
+const P_init = perfFor(this);
+
+const a_kts0   = isaSpeedOfSoundKts(this.alt_ft);
+const machCapTAS = (P_init.machCruise + 0.03) * a_kts0; // econ+0.03 soft max
+
+let initTas = opts.spd_kt ?? (this.alt_ft > 24000 ? 450 : 250);
+if (this.alt_ft > 18000) initTas = Math.min(initTas, machCapTAS);  // avoid spawning above Mach cap
+
+this.spd_kt = initTas;
+// Canonical speed: keep IAS as the commanded/editable state
+this.ias_kt = tasToIas(this.spd_kt, this.alt_ft);
+
       this.fp = opts.fp ?? null;   // Short Flight Plan (dep, dest, cruiseFL, tasKt, type)
-      this.type = opts.type ?? pick(TYPES);   // <-- new: default a random type
+      this.type = opts.type ?? (this.fp?.type) ?? pick(TYPES);
       this.route = [];         // array of waypoint ids
       this.routeIdx = 0;       // current active leg target index
       this.role = opts.role ?? null;     // 'arrival' | 'departure' | 'transit'
@@ -716,8 +846,12 @@ function resolveEndpoint(ep){
       this.tgtMach=null;
 
 
-      // Dynamics
-      this.turnRateDps=3; this.accel_ktps=1.0; this.maxVS_fps=4000*ftPerMinToFtPerSec;
+      // Dynamics (type-based)
+const P = perfFor(this);
+this.turnRateDps = P.turnRateDps;
+this.baseAccelIAS_ktps = P.accelIAS_ktps;            // base; we scale per-alt each tick
+this.maxVS_fps = Math.max(P.maxClimbFpm, Math.abs(P.maxDescentFpm)) * ftPerMinToFtPerSec;
+
 
       // Nav
       this.navMode=null; this.directWptId=null;
@@ -751,15 +885,18 @@ this.everInRect = env.inRect(this.x_nm, this.y_nm, this.alt_ft); // ever been in
   this.tgtAlt = Math.max(0, Math.round(alt_ft));
   const goingUp = this.tgtAlt > this.alt_ft;
 
-  // Requested magnitude (default 2000 fpm if none given)
   const reqMag = vs == null ? 2000 : Math.max(0, Math.abs(vs));
-  let mag = reqMag;
-
-  // If we are already at/above FL250 and commanding a CLIMB, force +500 fpm now.
-  if (goingUp && this.alt_ft >= 25000) mag = Math.min(mag, 500);
-
-  this.vs_fpm = (goingUp ? +1 : -1) * mag;
+  if (goingUp){
+    const cap = climbVsCapFpm(this, this.alt_ft);
+    this.vs_fpm = Math.min(reqMag, cap);
+  } else if (this.tgtAlt < this.alt_ft){
+    const cap = descentVsCapFpm(this);
+    this.vs_fpm = -Math.min(reqMag, cap);
+  } else {
+    this.vs_fpm = 0;
+  }
 }
+
 
 
     holdAltitude(){ this.tgtAlt=this.alt_ft; this.vs_fpm=0; }
@@ -950,33 +1087,42 @@ if (this.tgtSpeedMode === "MACH" && this.tgtMach){
 
 
 
-// Accelerate in IAS space
+// Accelerate in IAS space (degrades with altitude)
 {
   const dIAS = this.tgtIAS_kt - this.ias_kt;
-  const maxAccIAS = this.accel_ktps * dt;
-  if (Math.abs(dIAS) < maxAccIAS) this.ias_kt = this.tgtIAS_kt;
-  else this.ias_kt += Math.sign(dIAS) * maxAccIAS;
+  const accNow = dynAccelKtps(this);        // kt/s at current altitude
+  const maxStep = accNow * dt;
+  if (Math.abs(dIAS) < maxStep) this.ias_kt = this.tgtIAS_kt;
+  else this.ias_kt += Math.sign(dIAS) * maxStep;
 }
+
 
 // Convert IAS→TAS; physics uses TAS; GS = TAS (no wind)
 {
   const tasNow = iasToTas(this.ias_kt, this.alt_ft);
   this.spd_kt  = tasNow;
-  // keep legacy target field for any UI still reading it
   this.tgtSpd_kt = this.tgtIAS_kt;
+
+  // Hard Mach cap (prevents overspeed spawns / manual overshoots)
+  const capTas = maxMach(this) * isaSpeedOfSoundKts(this.alt_ft); // econ+0.03
+  if (this.spd_kt > capTas){
+    this.spd_kt = capTas;
+    this.ias_kt = tasToIas(this.spd_kt, this.alt_ft);
+  }
 }
+
 /* =================================================================== */
 
 
       if (this.alt_ft !== this.tgtAlt){
   const climbing = this.tgtAlt > this.alt_ft;
 
-  // Start from the current commanded VS (pilot or default)
+  // Start from the current commanded VS (pilot or default), then cap by envelope
   let vs_fpm = this.vs_fpm;
-
-  // While CLIMBING at/above FL250, hard-cap to +500 fpm (auto-hop when we reach it).
-  if (climbing && this.alt_ft >= 25000){
-    vs_fpm = Math.min(vs_fpm, 500);
+  if (climbing){
+    vs_fpm = Math.min(vs_fpm, climbVsCapFpm(this, this.alt_ft));
+  } else {
+    vs_fpm = -Math.min(Math.abs(vs_fpm), descentVsCapFpm(this));
   }
 
   // Convert to fps & soften near level-off
@@ -2522,7 +2668,7 @@ function disarmCooldown(){ AutoSpawn.cooldownSec = Infinity; }
 
 // routeMode can be 'arrival' | 'departure' | 'transit' | null
 function spawnWithParams({x_nm,y_nm,hdg,alt_ft,spd_kt, jitterDeg=0, routeMode=null, routeOverride=null}, fp=null){
-  const a = new Aircraft({ x_nm, y_nm, hdg, alt_ft, spd_kt, fp, role: routeMode });
+  const a = new Aircraft({ x_nm, y_nm, hdg, alt_ft, spd_kt, fp, type: fp?.type, role: routeMode });
 
   if (jitterDeg) hdg = mod360(hdg + rand(-jitterDeg, +jitterDeg));
   a.setHeading(hdg);
@@ -3100,7 +3246,8 @@ tag.classList.toggle('is-selected', a.id === state.selectedId);
 // build 4 text lines (no box, no table)
 const curFL = fmtFLshort(a.alt_ft);
 const cfl   = fmtCFL(a.tgtAlt);
-const type  = a.fp?.type || a.type;
+// when building the tag
+const type = a.type;   // instead of a.fp?.type || a.type
 const wpt   = nextWptName(a, env);
 const vs100 = fmtVS100(a.vs_fpm);
 const gs    = a.spd_kt | 0;  // <-- NEW (TAS ≈ GS)
