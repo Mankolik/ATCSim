@@ -694,13 +694,14 @@ function getTrackState(a){
   // --- Short Flight Plan (SFP) & helpers ---
 const DEP_PORTS = ["EPWA","EPMO","EPLL","EPWR","EPPO","EPKK","EPKT","LKPR"];
 const ARR_PORTS = ["EPWA","EPMO","EPLL","EPWR","EPPO","EPKK","EPKT","LKPR"];
-// Expanded fleet mix (medium/long-haul + regionals; jets only to fit your FL spawn logic)
+// Expanded fleet mix (modern, commonly seen; no retired/classics)
 const TYPES = [
-  // existing
-  "A20N","A21N","A320","A321","B738","B38M","B763","B77W","B789","A332","A359","E190","E75S","CRJ9","B744",
-  // NEW narrowbody/regionals/classics (FL300–380-ish)
-  "A318","A319","B752","B753","B712","MD82","MD90","E170","E175","E195","CRJ2","CRJ7","F70","F100"
+  "A20N","A21N","A320","A321",
+  "B738","B38M",
+  "E170","E175","E190","E195","E75S","CRJ7","CRJ9",
+  "A332","A359","B77W","B789","B744","B763"
 ];
+
 
 
 /**
@@ -2745,7 +2746,7 @@ console.info('[Routes] Loaded:',
 const SPAWN = {
   flMin: 330,      // inclusive
   flMax: 400,      // inclusive
-  marginNM: 25,     // how far outside the sector to spawn
+  marginNM: 65,     // how far outside the sector to spawn
   jitterDeg: 45    // ± jitter to avoid perfectly cardinal inbounds
 };
 
@@ -2880,7 +2881,7 @@ function spawnPointNearSectorTowardsFix(firstFixId){
   const halfW = env.rectW/2, halfH = env.rectH/2;
   const len = Math.hypot(vx, vy) || 1;
   const ux = vx/len, uy = vy/len;
-  const push = 6 + Math.random()*4;                  // 6–10 NM outside
+  const push = 30 + Math.random()*8;                  // 6–10 NM outside
   const m = Math.max(6, Math.min(SPAWN.marginNM, 20));
 
   const cand = [];
@@ -3295,21 +3296,42 @@ function buildPredictedConflictBand(a, b, tStartSec, extraMaxSec=PREDICT_MAX_EXT
         tag.className='tag';
         tag.dataset.trackId=String(a.id);
         // Drag/select + editing handlers (NEW MOUSE MAP)
-        // Block MMB on inline-edit fields (H/S/M/CFL/VS/XFL/WPT) so MMB can't edit them
+        
+        // --- MMB on label = measure from/to this a/c (except callsign/WPT) ---
 tag.addEventListener('auxclick', (ev)=>{
-  if (ev.button === 1 && ev.target.closest('[data-act]')){
-    ev.preventDefault();
-    ev.stopPropagation();
+  if (ev.button !== 1) return;             // middle only
+
+  const onCS  = ev.target.closest('[data-cs]');          // callsign -> SFP (handled elsewhere)
+  const onWPT = ev.target.closest('[data-act="wpt"]');   // WPT -> route preview (handled elsewhere)
+  if (onCS || onWPT) return;
+
+  ev.preventDefault();
+  ev.stopPropagation();
+
+  // Build an aircraft endpoint for this tag's aircraft
+  const epAC = { type:'ac', id: a.id, x_nm: a.x_nm, y_nm: a.y_nm };
+
+  if (!state.measure || !state.measure.from) {
+    // START a ruler anchored FROM this aircraft
+    state.measure = { from: epAC, to: null };
+  } else {
+    // FINISH the ruler TO this aircraft (even if a cursor preview 'to' exists)
+    state.measure.to = epAC;
+
+    // Commit and clear the active ruler
+    state.measures.push({ from: state.measure.from, to: state.measure.to });
+    state.measure = null;
   }
+
+  drawAll();
 }, true);
 
-// Also prevent browser autoscroll on those fields
+// Block browser autoscroll for MMB on the tag background
 tag.addEventListener('mousedown', (ev)=>{
-  if (ev.button === 1 && ev.target.closest('[data-act]')){
-    ev.preventDefault();
-    ev.stopPropagation();
-  }
+  if (ev.button === 1){ ev.preventDefault(); ev.stopPropagation(); }
 }, true);
+
+
 
 // RMB = drag/move the label
 // MMB = open SFP (on tag); Shift+MMB = toggle route preview
@@ -3629,16 +3651,17 @@ withMMB(xflEl, ()=>{
 
 
 
-// WPT picker (MMB) — only remaining FPL fixes; selecting short-cuts the route
+// WPT field: MMB toggles route preview for THIS aircraft (no Shift)
 const wptEl = act('wpt'); blockMMB(wptEl);
 withMMB(wptEl, ()=>{
-  const list = routeRemainingFixes(a);
-  if (!list.length){
-    alert("No remaining fixes in the flight plan.");
-    return;
-  }
-  openWptPicker(wptEl, a);
+  // keep focus/selection on this aircraft
+  state.selectedId = a.id;
+  // toggle preview
+  state.routePreviewId = (state.routePreviewId === a.id) ? null : a.id;
+  updateSelectedPanel();
+  drawAll();
 });
+
 
 
 
@@ -4020,35 +4043,23 @@ canvas.addEventListener('click', e=>{
   updateSelectedPanel(); layoutTags(); drawCanvasOnly();
 });
 
-// 3) Pointer handlers (STRICT LMB+RMB PAN — no RMB-only)
-//    - Pan only when BOTH LMB+RMB are held (in any order)
-//    - Shift+LMB = smart measure
-//    - MMB = smart measure
+// 3) Pointer handlers
+//    - Pan = hold LMB+RMB together (anywhere except on a tag)
+//    - MMB = smart measure (start/finish)
 canvas.addEventListener('pointerdown', e=>{
   const r = canvas.getBoundingClientRect();
   const xPx = e.clientX - r.left, yPx = e.clientY - r.top;
 
-  // Don’t steal events from labels
+  // If you pressed on a label, ignore canvas handlers (labels have their own)
   if (e.target.closest('.tag')) return;
 
-  const bothDown = ((e.buttons & 1) && (e.buttons & 2));
-
-  // Start panning ONLY if both are down (no RMB-only fallback)
-  if (!e.shiftKey && bothDown){
+  // Start panning ONLY when BOTH LMB + RMB are held
+  const wantsPan = ((e.buttons & 1) && (e.buttons & 2));
+  if (wantsPan){
     isPanning = true;
     panStartClient.x = e.clientX; panStartClient.y = e.clientY;
-    panStartPx.x     = PAN.x;     panStartPx.y     = PAN.y;
+    panStartPx.x = PAN.x;         panStartPx.y = PAN.y;
     try{ canvas.setPointerCapture(e.pointerId); }catch{}
-    e.preventDefault();
-    return;
-  }
-
-  // Shift + Left Click = smart measure
-  if (e.shiftKey && e.button === 0){
-    try{ canvas.setPointerCapture(e.pointerId); }catch{}
-    if (typeof handleMeasureSmartClick === 'function') {
-      handleMeasureSmartClick(xPx, yPx);
-    }
     e.preventDefault();
     return;
   }
@@ -4065,24 +4076,14 @@ canvas.addEventListener('pointerdown', e=>{
 });
 
 canvas.addEventListener('pointermove', e=>{
-  // Late-start tolerance: begin panning the moment BOTH are down
-  if (!isPanning && !e.shiftKey && !e.target.closest('.tag') && ((e.buttons & 1) && (e.buttons & 2))){
-    isPanning = true;
-    panStartClient.x = e.clientX; panStartClient.y = e.clientY;
-    panStartPx.x     = PAN.x;     panStartPx.y     = PAN.y;
-    try{ canvas.setPointerCapture(e.pointerId); }catch{}
-    e.preventDefault();
-    return;
-  }
-
+  // PANNING
   if (isPanning){
-    // Stop if either button is released
-    if (!((e.buttons & 1) && (e.buttons & 2))){
+    // Stop if either button was released
+    if (!((e.buttons & 1) && (e.buttons & 2))) {
       isPanning = false;
       try { canvas.releasePointerCapture(e.pointerId); } catch {}
       return;
     }
-
     const dx = e.clientX - panStartClient.x;
     const dy = e.clientY - panStartClient.y;
     PAN.x = panStartPx.x + dx;
@@ -4122,15 +4123,11 @@ canvas.addEventListener('pointerup', e=>{
     e.preventDefault();
   }
 });
+canvas.addEventListener('pointercancel', ()=>{ isPanning = false; });
 
-canvas.addEventListener('pointercancel', ()=>{
-  isPanning = false;
-});
-
-// Optional: while panning, suppress the context menu that might appear on RMB-up
-canvas.addEventListener('contextmenu', e=>{
-  if (isPanning) e.preventDefault();
-});
+// Always suppress right-click menu on the radar canvas and wrapper
+canvas.addEventListener('contextmenu', e=>{ e.preventDefault(); });
+wrap.addEventListener('contextmenu',  e=>{ e.preventDefault(); });
 
 
 
