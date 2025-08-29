@@ -2706,14 +2706,17 @@ function determineArrivalXFL(ac){
   const rule = ARR_XFL_RULES[dest];
   if (!rule) return null;
 
-  const hasFix = (name)=> (ac.route||[]).some(id => (env.getWaypoint(id)?.name||"")===name);
-
   if (typeof rule === 'number') return rule*100;
-  for (const [fix, fl] of Object.entries(rule)){
-    if (hasFix(fix)) return fl*100;
+
+  // Prefer the first route fix that has a mapping
+  const map = rule;
+  for (const id of ac.route || []){
+    const nm = env.getWaypoint(id)?.name || "";
+    if (map[nm] != null) return map[nm]*100;
   }
   return null;
 }
+
 
 function buildTransitRoute(/*fp*/){
   return TRANSIT_ROUTES_ID.length ? pickRand(TRANSIT_ROUTES_ID).slice() : [];
@@ -4076,7 +4079,21 @@ canvas.addEventListener('pointerdown', e=>{
 });
 
 canvas.addEventListener('pointermove', e=>{
-  // PANNING
+  // If both buttons are now down but pan hasn't started (some browsers only update
+  // e.buttons after movement), begin panning here.
+  if (!isPanning && (e.buttons & 1) && (e.buttons & 2)) {
+    // Don’t start a canvas pan when hovering a tag
+    if (!e.target.closest('.tag')) {
+      isPanning = true;
+      panStartClient.x = e.clientX; panStartClient.y = e.clientY;
+      panStartPx.x = PAN.x;         panStartPx.y = PAN.y;
+      try { canvas.setPointerCapture(e.pointerId); } catch {}
+      e.preventDefault();
+      return;
+    }
+  }
+
+  // Ongoing panning
   if (isPanning){
     // Stop if either button was released
     if (!((e.buttons & 1) && (e.buttons & 2))) {
@@ -4115,6 +4132,7 @@ canvas.addEventListener('pointermove', e=>{
   }
   drawCanvasOnly();
 });
+
 
 canvas.addEventListener('pointerup', e=>{
   if (isPanning){
