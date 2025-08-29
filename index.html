@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>ATC Radar Trainer — v8.1</title>
+<title>ATC Radar Trainer</title>
 <style>
   :root{
   /* Near-black scope */
@@ -38,6 +38,15 @@
     border-bottom:1px solid #162737}
   header h1{margin:0; font-size:16px; font-weight:600; letter-spacing:.5px; color:var(--accent)}
   header .controls{display:flex; gap:8px; flex-wrap:wrap; margin-left:auto}
+  /* Compact tool styles in top bar */
+header .controls .compact{display:flex; align-items:center; gap:6px; flex-wrap:wrap}
+header .controls .compact *{font-size:12px}
+header .controls .compact input,
+header .controls .compact select,
+header .controls .compact button{padding:6px 8px; border-radius:6px}
+header .controls .compact .num{width:80px}
+.iconBtn{line-height:1}
+
   button,input,select{background:#0d1a22; border:1px solid #1b3243; color:var(--text); padding:8px 10px; border-radius:8px; outline:none}
   button:hover{border-color:#24516e; cursor:pointer}
   input[type="number"],input[type="text"]{width:110px}
@@ -84,6 +93,16 @@
   color:currentColor;              /* match the label’s state color */
   opacity:.95;
   font-variant-numeric:tabular-nums; /* no width wiggle when digits change */
+}
+/* Hide the sidebar & collapse layout when .no-panel is on <body> */
+body.no-panel{
+  grid-template-columns: 1fr;
+  grid-template-areas:
+    "top"
+    "radar";
+}
+body.no-panel aside{
+  display: none !important; /* keep DOM for JS, but don’t render it */
 }
 
 
@@ -239,9 +258,10 @@ body.label-lg .tag .l2{ font-size:14px }
 
 </style>
 </head>
-<body>
+<body class="no-panel">
+
 <header>
-  <h1>ATC Radar Trainer — v8.1</h1>
+  <h1>ATC Radar Trainer</h1>
   <div class="controls">
     <button id="spawn">Spawn traffic</button>
     <label class="small">
@@ -278,6 +298,38 @@ body.label-lg .tag .l2{ font-size:14px }
     <option value="lg">Large</option>
   </select>
 </label>
+
+
+<!-- TOP: compact tools -->
+<div class="compact" id="topTools">
+  <!-- Predict vectors (select like Range) -->
+  <label class="small" title="Predict vectors">
+    PV
+    <select id="predTop">
+      <option value="off">Off</option>
+      <option value="1">1m</option>
+      <option value="3">3m</option>
+      <option value="5">5m</option>
+      <option value="all" selected>All</option>
+    </select>
+  </label>
+
+  <!-- Clear rulers -->
+  <button id="clearRulersTop" class="iconBtn" title="Clear rulers">📏✖</button>
+
+  <!-- Auto-handoff -->
+  <label class="small" title="Auto-handoff">
+    <input id="autoHandoffTop" type="checkbox" checked> H/O
+  </label>
+
+  <!-- Altitude filter -->
+  <label class="small" title="Altitude filter">
+    <input id="fltMinTop" class="num" type="number" step="100" value="0">
+    <span>–</span>
+    <input id="fltMaxTop" class="num" type="number" step="100" value="60000">
+    <button id="btnFilterTop" class="iconBtn" title="Apply filter">✔</button>
+  </label>
+</div>
 
   </div>
 </header>
@@ -1103,10 +1155,12 @@ if (this.tgtSpeedMode === "MACH" && this.tgtMach){
   this.spd_kt  = tasNow;
   this.tgtSpd_kt = this.tgtIAS_kt;
 
-  // Hard Mach cap (prevents overspeed spawns / manual overshoots)
+    // Soft Mach cap: gently bleed TAS back to the cap if we overshoot
   const capTas = maxMach(this) * isaSpeedOfSoundKts(this.alt_ft); // econ+0.03
   if (this.spd_kt > capTas){
-    this.spd_kt = capTas;
+    const over = this.spd_kt - capTas;           // kt above cap
+    const bleedKtps = 1.5 + 0.05 * over;         // kt/s, scales with how far over
+    this.spd_kt = Math.max(capTas, this.spd_kt - bleedKtps * dt);
     this.ias_kt = tasToIas(this.spd_kt, this.alt_ft);
   }
 }
@@ -1974,6 +2028,46 @@ const SECTOR_BBOX = (() => {
   return {minX,maxX,minY,maxY, width:maxX-minX, height:maxY-minY};
 })();
 
+// === Foreign airport pools (exclude local/used) + edge-side classifier ======
+const FOREIGN_AIRPORTS = {
+  // WEST side candidates (Germany)
+  W: ["EDDB","EDDP","EDDC","EDDH","EDDF"],        // Berlin, Leipzig, Dresden, Hamburg, Frankfurt
+
+  // NORTH side candidates (Nordic/Baltic)
+  N: ["EKCH","ESSA","ESGG","EVRA","EETN"],        // Copenhagen, Stockholm, Gothenburg, Riga, Tallinn
+
+  // EAST side candidates (Baltics/Belarus/Ukraine)
+  E: ["EYVI","UMMS","UKLL","EETN","EVRA"],        // Vilnius, Minsk, Lviv, Tallinn, Riga
+
+  // SOUTH side candidates (Austria/Hungary/Slovakia/Czech-not-LKPR)
+  S: ["LOWW","LHBP","LZIB","LZKZ","LKTB"],        // Vienna, Budapest, Bratislava, Košice, Brno
+};
+
+// Any airports already used in your domestic/templates set — keep them OUT
+const LOCAL_OR_USED = new Set(["EPWA","EPMO","EPLL","EPWR","EPPO","EPKK","EPKT","LKPR"]);
+
+// Given a fix, decide which side of the sector bbox it’s nearest to (W/E/N/S)
+function sideForFix(fix){
+  if (!fix) return null;
+  const { minX, maxX, minY, maxY } = SECTOR_BBOX;
+  const dL = Math.abs(fix.x_nm - minX);
+  const dR = Math.abs(maxX - fix.x_nm);
+  const dT = Math.abs(fix.y_nm - minY);
+  const dB = Math.abs(maxY - fix.y_nm);
+  const dMin = Math.min(dL, dR, dT, dB);
+  if (dMin === dL) return "W";
+  if (dMin === dR) return "E";
+  if (dMin === dT) return "N";
+  return "S";
+}
+
+function pickForeignAirportForSide(side, avoid=[]){
+  const avoidSet = new Set(avoid.map(s => String(s||"").toUpperCase()));
+  let pool = (FOREIGN_AIRPORTS[side] || []).filter(code => !LOCAL_OR_USED.has(code) && !avoidSet.has(code));
+  if (!pool.length) pool = (FOREIGN_AIRPORTS[side] || []); // fallback if we filtered everything out
+  return pool[Math.floor(Math.random()*pool.length)];
+}
+
 
   const env = {
   restrict250:false, autoHandoff:true,
@@ -1997,7 +2091,7 @@ const SECTOR_BBOX = (() => {
     simSpeed:1,
     filterMin:0, filterMax:60000,
     pred1:true, pred3:true, pred5:true, predFor:"all",
-    lookaheadMin:2,
+    lookaheadMin:3,
     conflictsNow:[], conflictsPred:[],
     conflictsPredDetail:[],  // ← geometry for continuous amber band
     addingWpt:false,
@@ -2709,6 +2803,40 @@ let route = routeOverride ? routeOverride.slice() :
         
 if (Array.isArray(route) && route.length){
     a.setRoute(route);
+}
+
+// === Assign plausible dep/dest from entry/exit gates (FOREIGN-ONLY) ========
+try{
+  // Determine entry/exit fixes from the chosen route
+  const firstFix = Array.isArray(route) && route.length ? env.getWaypoint(route[0]) : null;
+  const lastFix  = Array.isArray(route) && route.length ? env.getWaypoint(route[route.length - 1]) : null;
+
+  // Classify which side they sit on
+  const entrySide = firstFix ? sideForFix(firstFix) : null;
+  const exitSide  = lastFix  ? sideForFix(lastFix)  : null;
+
+  // Ensure SFP exists
+  a.fp = a.fp || { dep:null, dest:null, cruiseFL:(a.xfl_ft ? Math.round(a.xfl_ft/100) : 360), tasKt:Math.round(a.spd_kt), type:a.type };
+
+  // Build avoid list so we don’t pick duplicates or local codes
+  const baseAvoid = Array.from(LOCAL_OR_USED);
+
+  // Rule:
+  // - If an a/c ENTERS via a side (e.g., GOVEN=W), its **departure** is a FOREIGN airport from that side.
+  // - If it EXITS via a side, its **destination** is a FOREIGN airport from that side.
+  // - Applies to all edges; for TRANSIT we set both ends.
+  if (mode === 'arrival'){
+    if (entrySide) a.fp.dep = pickForeignAirportForSide(entrySide, [...baseAvoid, a.fp.dest]);
+    // keep dest from your route template (Polish arrival airport)
+  } else if (mode === 'departure'){
+    if (exitSide)  a.fp.dest = pickForeignAirportForSide(exitSide,  [...baseAvoid, a.fp.dep]);
+    // keep dep from your route template (Polish departure airport)
+  } else if (mode === 'transit'){
+    if (entrySide) a.fp.dep  = pickForeignAirportForSide(entrySide, baseAvoid);
+    if (exitSide)  a.fp.dest = pickForeignAirportForSide(exitSide,  [...baseAvoid, a.fp.dep]);
+  }
+} catch(e){
+  console.warn('Foreign airport inference skipped:', e);
 }
 
 
@@ -4013,6 +4141,66 @@ wrap.addEventListener('wheel', (e)=>{
     state.filterMax=parseInt(document.getElementById('fltMax').value,10)||60000;
     drawAll();
   });
+  
+  // ===== Top-bar compact controls =====
+function applyPredSelect(val){
+  // Map select -> existing tri-state checkboxes (kept in state)
+  if (val === 'off'){ state.pred1=false; state.pred3=false; state.pred5=false; }
+  else if (val === '1'){ state.pred1=true;  state.pred3=false; state.pred5=false; }
+  else if (val === '3'){ state.pred1=false; state.pred3=true;  state.pred5=false; }
+  else if (val === '5'){ state.pred1=false; state.pred3=false; state.pred5=true;  }
+  else /* all */      { state.pred1=true;  state.pred3=true;  state.pred5=true;  }
+
+  // Keep hidden sidebar checkboxes in sync (if they exist)
+  for (const id of ['pred1','pred3','pred5']){
+    const el = document.getElementById(id);
+    if (el) el.checked = !!state[id];
+  }
+  drawAll();
+}
+
+function initTopCompact(){
+  // Pred select reflects current state
+  const predTop = document.getElementById('predTop');
+  if (predTop){
+    const key = (state.pred1 && state.pred3 && state.pred5) ? 'all'
+              : state.pred1 ? '1'
+              : state.pred3 ? '3'
+              : state.pred5 ? '5'
+              : 'off';
+    predTop.value = key;
+  }
+
+  // Auto-handoff mirror
+  const ahTop = document.getElementById('autoHandoffTop');
+  if (ahTop) ahTop.checked = !!env.autoHandoff;
+
+  // Alt filter mirror
+  const minTop = document.getElementById('fltMinTop');
+  const maxTop = document.getElementById('fltMaxTop');
+  if (minTop) minTop.value = state.filterMin;
+  if (maxTop) maxTop.value = state.filterMax;
+
+  // Hook listeners
+  predTop?.addEventListener('change', e=> applyPredSelect(e.target.value));
+  document.getElementById('clearRulersTop')?.addEventListener('click', ()=>{
+    state.measures.length = 0; drawAll();
+  });
+  ahTop?.addEventListener('change', e=>{
+    env.autoHandoff = e.target.checked;
+    const chk = document.getElementById('autoHandoff');
+    if (chk) chk.checked = env.autoHandoff; // keep sidebar in sync if present
+  });
+  document.getElementById('btnFilterTop')?.addEventListener('click', ()=>{
+    state.filterMin = parseInt(document.getElementById('fltMinTop').value,10) || 0;
+    state.filterMax = parseInt(document.getElementById('fltMaxTop').value,10) || 60000;
+    // mirror hidden sidebar fields if present
+    const minEl = document.getElementById('fltMin'); if (minEl) minEl.value = state.filterMin;
+    const maxEl = document.getElementById('fltMax'); if (maxEl) maxEl.value = state.filterMax;
+    drawAll();
+  });
+}
+
 
 
 
@@ -4140,6 +4328,7 @@ window.addEventListener('load', () => {
   // NEW: sync the actual range to the selected option (160 by default)
   rangeNM = parseInt(document.getElementById('rangeSel').value, 10) || 120;
     rebuildRangeSelect();
+     initTopCompact();
 
 
   spawnPlannedAircraft();
