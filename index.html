@@ -1255,6 +1255,14 @@ if (leftSector) {
  // ---------- World / Sim ----------
 const canvas=document.getElementById('radar'); const ctx=canvas.getContext('2d');
 const wrap=document.getElementById('radarWrap');
+
+// Allow RMB actions on scope/labels by blocking the default context menu only there
+document.addEventListener('contextmenu', (ev)=>{
+  if (wrap.contains(ev.target) || ev.target.closest('.tag')) {
+    ev.preventDefault();
+  }
+}, {capture:true});
+
 let W=0,H=0,cx=0,cy=0;
 // Center shift in **pixels** ( +x = push content right, -y = push content up )
 const CENTER_SHIFT = { x: -90, y: 60 };  // tweak to taste
@@ -3286,28 +3294,50 @@ function buildPredictedConflictBand(a, b, tStartSec, extraMaxSec=PREDICT_MAX_EXT
         tag=document.createElement('div');
         tag.className='tag';
         tag.dataset.trackId=String(a.id);
-        // Drag/select handlers
-        let dragging=false, startX=0,startY=0, startDx=0,startDy=0, moved=false;
-        tag.addEventListener('pointerdown', ev=>{
-  // NEW: Shift + Left Click on tag → use that aircraft position as a measure point
-  if (ev.shiftKey && ev.button === 0) {
-    const ax = cx + nmToPx(a.x_nm);
-    const ay = cy + nmToPx(a.y_nm);
-    handleMeasureSmartClick(ax, ay);
+        // Drag/select + editing handlers (NEW MOUSE MAP)
+        // Block MMB on inline-edit fields (H/S/M/CFL/VS/XFL/WPT) so MMB can't edit them
+tag.addEventListener('auxclick', (ev)=>{
+  if (ev.button === 1 && ev.target.closest('[data-act]')){
     ev.preventDefault();
-    return;
+    ev.stopPropagation();
   }
+}, true);
 
-  if(ev.button!==0) return; // left only
-  dragging=true; moved=false; tag.setPointerCapture(ev.pointerId);
-  tag.classList.add('dragging');
+// Also prevent browser autoscroll on those fields
+tag.addEventListener('mousedown', (ev)=>{
+  if (ev.button === 1 && ev.target.closest('[data-act]')){
+    ev.preventDefault();
+    ev.stopPropagation();
+  }
+}, true);
+
+// RMB = drag/move the label
+// MMB = open SFP (on tag); Shift+MMB = toggle route preview
+// LMB = editing (click fields with data-act=hdg|spd|mach|vs|cfl|wpt, or select tag)
+
+// --- RMB drag state
+let dragging=false, startX=0,startY=0, startDx=0,startDy=0, moved=false;
+
+// RMB down starts label drag
+tag.addEventListener('pointerdown', ev=>{
+  if (ev.button !== 2) return; // right only
   const aObj = state.ac.find(z=>z.id===a.id); if(!aObj) return;
-  startX=ev.clientX; startY=ev.clientY; startDx=aObj.labelDx; startDy=aObj.labelDy; ev.preventDefault();
+
+  dragging = true; moved=false;
+  tag.setPointerCapture(ev.pointerId);
+  tag.classList.add('dragging');
+
+  startX=ev.clientX; startY=ev.clientY;
+  startDx=aObj.labelDx; startDy=aObj.labelDy;
+
+  ev.preventDefault();
 });
 
-        tag.addEventListener('pointermove', ev=>{
+// Drag while RMB held
+tag.addEventListener('pointermove', ev=>{
   if(!dragging) return;
-  if ((ev.buttons & 1) === 0) {  // LMB no longer held
+  // if RMB is no longer held, stop the drag
+  if ((ev.buttons & 2) === 0) {
     dragging=false; tag.classList.remove('dragging');
     try{ tag.releasePointerCapture(ev.pointerId);}catch{}
     return;
@@ -3315,18 +3345,26 @@ function buildPredictedConflictBand(a, b, tStartSec, extraMaxSec=PREDICT_MAX_EXT
   const aObj = state.ac.find(z=>z.id===a.id); if(!aObj) return;
   const dx=ev.clientX-startX, dy=ev.clientY-startY;
   if(Math.hypot(dx,dy)>3) moved=true;
+
   aObj.labelDx = startDx + dx; aObj.labelDy = startDy + dy;
   tag.style.left = (cx+nmToPx(aObj.x_nm) + aObj.labelDx) + 'px';
   tag.style.top  = (cy+nmToPx(aObj.y_nm) + aObj.labelDy) + 'px';
+
   drawCanvasOnly();
   repositionLevelPicker();
-
 });
 
-        tag.addEventListener('pointerup', ev=>{
-  tag.classList.remove('dragging');
-  if(dragging && !moved){ state.selectedId=a.id; flashSelected(); updateSelectedPanel(); layoutTags(); drawCanvasOnly(); }
+tag.addEventListener('pointerup', ev=>{
+  if (dragging && !moved){
+    // RMB click (no move) just selects the a/c
+    state.selectedId = a.id;
+    flashSelected();
+    updateSelectedPanel();
+    layoutTags();
+    drawCanvasOnly();
+  }
   dragging=false;
+  tag.classList.remove('dragging');
   try{ tag.releasePointerCapture(ev.pointerId);}catch{}
 });
 tag.addEventListener('pointercancel', ()=>{
@@ -3336,26 +3374,71 @@ tag.addEventListener('lostpointercapture', ()=>{
   dragging=false; tag.classList.remove('dragging');
 });
 
-        tag.addEventListener('click', ev=>{ ev.stopPropagation(); });
+// MMB on tag:
+//   - Shift+MMB = toggle route preview
+//   - Plain MMB = open SFP for this aircraft
+tag.addEventListener('auxclick', (ev)=>{
+  if (ev.button !== 1) return; // middle only
+  ev.preventDefault(); // block browser autoscroll
+  ev.stopPropagation();
+
+  if (ev.shiftKey){
+    state.routePreviewId = (state.routePreviewId === a.id) ? null : a.id;
+    drawAll();
+  } else {
+    if (typeof openSFP === 'function') openSFP(a);
+  }
+});
+// Also block autoscroll on mousedown (some browsers)
+tag.addEventListener('mousedown', (ev)=>{
+  if (ev.button === 1) { ev.preventDefault(); ev.stopPropagation(); }
+});
+
+// LMB on tag = editing / selection
+tag.addEventListener('click', (ev)=>{
+  const anchor = ev.target.closest('[data-act]');
+  if (anchor){
+    const act = anchor.getAttribute('data-act');
+    switch (act) {
+      case 'hdg':  openHeadingPicker(anchor, a); break;
+      case 'spd':  openIASPicker(anchor, a);     break;
+      case 'mach': openMachPicker(anchor, a);    break;
+      case 'vs':   openVsPicker(anchor, a);      break;
+      case 'cfl':  {
+        const curFL = Math.round(a.tgtAlt/100)|0;
+        openLevelPicker(anchor, curFL, (fl)=>{
+          a.setAltitude(fl*100);
+          updateSelectedPanel(); drawAll();
+        });
+        break;
+      }
+      case 'wpt':  openWptPicker(anchor, a);     break;
+      case 'ho':   {
+        a.hoArmed = !a.hoArmed;
+        anchor.setAttribute('aria-pressed', a.hoArmed ? 'true' : 'false');
+        drawCanvasOnly();
+        break;
+      }
+    }
+    ev.stopPropagation();
+    return;
+  }
+  // click on empty area of the tag = select
+  state.selectedId = a.id;
+  updateSelectedPanel();
+  layoutTags();
+  drawCanvasOnly();
+});
+
         wrap.appendChild(tag);
         tagMap.set(a.id, tag);
         
-        // Bind once per tag: Shift+MMB toggles the green route preview;
-// also block the browser’s autoscroll on Shift+MMB.
-tag.addEventListener('auxclick', (ev)=>{
-  if (ev.button === 1 && ev.shiftKey){
-    state.routePreviewId = (state.routePreviewId === a.id) ? null : a.id;
-    drawAll(); // or drawCanvasOnly();
+document.addEventListener('contextmenu', (ev)=>{
+  if (wrap.contains(ev.target) || ev.target.closest('.tag')) {
     ev.preventDefault();
-    ev.stopPropagation();
   }
-});
-tag.addEventListener('mousedown', (ev)=>{
-  if (ev.button === 1 && ev.shiftKey){
-    ev.preventDefault();
-    ev.stopPropagation();
-  }
-});
+}, {capture:true});
+
 
       }
       // Update classes/content/position
@@ -3912,111 +3995,147 @@ let timer = setInterval(stepOnce, 3000);
   });
   updateAltPlaceholder();
 
-  // Canvas interactions
-  canvas.addEventListener('click', e=>{
-    if(state.addingWpt){
-      const rect=canvas.getBoundingClientRect();
-      const xPx=e.clientX-rect.left, yPx=e.clientY-rect.top;
-      const {x_nm,y_nm}=pxToNm(xPx,yPx);
-      addWaypointAt(x_nm,y_nm); state.addingWpt=false;
-      document.getElementById('addWpt').textContent="Add waypoint"; return;
-    }
-    state.selectedId=null; updateSelectedPanel(); layoutTags(); drawCanvasOnly();
-  });
+  // === Canvas interactions (REPLACED) ===
 
-// Measuring: Shift+MMB start/update, RMB now DROPS (commits) instead of clearing.
-//           NEW: Shift+Left Click = start/finish with snapping
+// 1) Block MMB autoscroll on the canvas
+canvas.addEventListener('mousedown', e=>{
+  if (e.button === 1){ e.preventDefault(); e.stopPropagation(); }
+});
+canvas.addEventListener('auxclick', e=>{
+  if (e.button === 1){ e.preventDefault(); e.stopPropagation(); }
+});
+
+// 2) Simple click (kept): add waypoint when armed, otherwise clear selection
+canvas.addEventListener('click', e=>{
+  if (state.addingWpt){
+    const r = canvas.getBoundingClientRect();
+    const xPx = e.clientX - r.left, yPx = e.clientY - r.top;
+    const {x_nm, y_nm} = pxToNm(xPx, yPx);
+    addWaypointAt(x_nm, y_nm);
+    state.addingWpt = false;
+    document.getElementById('addWpt').textContent = "Add waypoint";
+    return;
+  }
+  state.selectedId = null;
+  updateSelectedPanel(); layoutTags(); drawCanvasOnly();
+});
+
+// 3) Pointer handlers (STRICT LMB+RMB PAN — no RMB-only)
+//    - Pan only when BOTH LMB+RMB are held (in any order)
+//    - Shift+LMB = smart measure
+//    - MMB = smart measure
 canvas.addEventListener('pointerdown', e=>{
-  const rect = canvas.getBoundingClientRect();
-  const xPx = e.clientX - rect.left, yPx = e.clientY - rect.top;
+  const r = canvas.getBoundingClientRect();
+  const xPx = e.clientX - r.left, yPx = e.clientY - r.top;
 
-  // Start panning with RMB, or with LMB while RMB is held (no Shift)
-  const wantsPan = (e.button === 2) || (e.button === 0 && (e.buttons & 2));
-  if (!e.shiftKey && wantsPan){
+  // Don’t steal events from labels
+  if (e.target.closest('.tag')) return;
+
+  const bothDown = ((e.buttons & 1) && (e.buttons & 2));
+
+  // Start panning ONLY if both are down (no RMB-only fallback)
+  if (!e.shiftKey && bothDown){
     isPanning = true;
     panStartClient.x = e.clientX; panStartClient.y = e.clientY;
-    panStartPx.x = PAN.x; panStartPx.y = PAN.y;
+    panStartPx.x     = PAN.x;     panStartPx.y     = PAN.y;
     try{ canvas.setPointerCapture(e.pointerId); }catch{}
     e.preventDefault();
     return;
   }
 
-  // Shift + Left Click = smart start/finish (snaps to aircraft if close)
-  if (e.shiftKey && e.button === 0) {
+  // Shift + Left Click = smart measure
+  if (e.shiftKey && e.button === 0){
     try{ canvas.setPointerCapture(e.pointerId); }catch{}
-    handleMeasureSmartClick(xPx, yPx);
+    if (typeof handleMeasureSmartClick === 'function') {
+      handleMeasureSmartClick(xPx, yPx);
+    }
     e.preventDefault();
     return;
   }
 
-  // Plain Left Click = if already measuring, drop/commit immediately
-  if (!e.shiftKey && e.button === 0 && state.measure) {
-    state.measures.push({ ...state.measure });
-    state.measure = null;
-    drawAll();
+  // Plain MMB = smart measure start/finish
+  if (e.button === 1){
+    if (typeof handleMeasureSmartClick === 'function') {
+      handleMeasureSmartClick(xPx, yPx);
+    }
     e.preventDefault();
+    e.stopPropagation();
     return;
   }
 });
 
-
-
 canvas.addEventListener('pointermove', e=>{
-  // Panning
+  // Late-start tolerance: begin panning the moment BOTH are down
+  if (!isPanning && !e.shiftKey && !e.target.closest('.tag') && ((e.buttons & 1) && (e.buttons & 2))){
+    isPanning = true;
+    panStartClient.x = e.clientX; panStartClient.y = e.clientY;
+    panStartPx.x     = PAN.x;     panStartPx.y     = PAN.y;
+    try{ canvas.setPointerCapture(e.pointerId); }catch{}
+    e.preventDefault();
+    return;
+  }
+
   if (isPanning){
+    // Stop if either button is released
+    if (!((e.buttons & 1) && (e.buttons & 2))){
+      isPanning = false;
+      try { canvas.releasePointerCapture(e.pointerId); } catch {}
+      return;
+    }
+
     const dx = e.clientX - panStartClient.x;
     const dy = e.clientY - panStartClient.y;
     PAN.x = panStartPx.x + dx;
     PAN.y = panStartPx.y + dy;
+
     // Recompute center and redraw
     cx = W/2 + CENTER_SHIFT.x + PAN.x;
     cy = H/2 + CENTER_SHIFT.y + PAN.y;
+
     drawAll();
     e.preventDefault();
     return;
   }
 
-  // Measuring preview follows cursor (works over labels thanks to capture)
-  if(!state.measure) return;
-  const rect=canvas.getBoundingClientRect();
-  const xPx=e.clientX-rect.left, yPx=e.clientY-rect.top;
+  // Measuring preview follows cursor (don’t override if 'to' is aircraft-linked)
+  if (!state.measure) return;
+  const rect = canvas.getBoundingClientRect();
+  const xPx = e.clientX - rect.left, yPx = e.clientY - rect.top;
+  if (state.measure.to && state.measure.to.type === 'ac') return;
 
-  // If 'to' is aircraft-linked, don't override it.
-  if(state.measure.to && state.measure.to.type === 'ac') return;
-
-  const {x_nm,y_nm}=pxToNm(xPx,yPx);
-  if(!state.measure.from && 'fromX_nm' in state.measure){
-    state.measure = { from:{x_nm:state.measure.fromX_nm, y_nm:state.measure.fromY_nm},
-                      to:{x_nm, y_nm} };
-  }else{
+  const {x_nm, y_nm} = pxToNm(xPx, yPx);
+  if (!state.measure.from && 'fromX_nm' in state.measure){
+    state.measure = {
+      from:{x_nm:state.measure.fromX_nm, y_nm:state.measure.fromY_nm},
+      to:{x_nm, y_nm}
+    };
+  } else {
     state.measure.to = {x_nm, y_nm};
   }
   drawCanvasOnly();
 });
 
-
-
 canvas.addEventListener('pointerup', e=>{
-  if (isPanning) isPanning = false;
-  try { canvas.releasePointerCapture(e.pointerId); } catch {}
+  if (isPanning){
+    isPanning = false;
+    try { canvas.releasePointerCapture(e.pointerId); } catch {}
+    e.preventDefault();
+  }
 });
 
-
-canvas.addEventListener('pointercancel', e=>{
+canvas.addEventListener('pointercancel', ()=>{
   isPanning = false;
-  try { canvas.releasePointerCapture(e.pointerId); } catch {}
 });
 
-// Allow context menu unless we just handled a commit above
-// Suppress browser menu while panning or if a ruler is active
-// Always suppress right-click menu on the radar canvas
+// Optional: while panning, suppress the context menu that might appear on RMB-up
 canvas.addEventListener('contextmenu', e=>{
-  e.preventDefault();
+  if (isPanning) e.preventDefault();
 });
-// Also suppress right-click menu on the wrapper (edges around the canvas)
-wrap.addEventListener('contextmenu', e=>{
-  e.preventDefault();
-});
+
+
+
+// === END Canvas interactions ===
+
 
 
 
